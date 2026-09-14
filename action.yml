@@ -1,0 +1,282 @@
+name: 'PPU Distributed Job'
+description: >-
+  以声明式 inputs 在 PPU 集群上提交并管理框架无关的分布式作业（单卡到多机多卡），
+  通过 PodGroup + default-scheduler 的 gang 调度与拓扑感知分配。
+  应在 CPU-only 编排 runner 上执行（由用户 workflow 的 runs-on 指定编排 runner 标签），
+  编排壳零占卡，算力仅在 worker pod 中消耗。
+author: 'flytiger-eco'
+
+branding:
+  icon: 'cpu'
+  color: 'blue'
+
+inputs:
+  nnodes:
+    description: '节点数（= worker Pod 数量），单机为 1，多机为 N'
+    required: false
+    default: '0'
+  nproc_per_node:
+    description: '每节点 PPU 卡数（每 Pod 请求的 alibabacloud.com/ppu 数量，任意正整数）'
+    required: false
+    default: '1'
+  command:
+    description: >-
+      用户自定义启动命令（必填）。Action 原样注入 worker pod 的 shell 执行，
+      可引用注入的分布式环境变量契约：$RANK $NODE_RANK $LOCAL_RANK $WORLD_SIZE
+      $NNODES $NPROC_PER_NODE $MASTER_ADDR $MASTER_PORT。
+    required: true
+  image:
+    description: '训练/推理容器镜像（必填，须包含作业代码与依赖）'
+    required: true
+  namespace:
+    description: 'K8s 命名空间'
+    required: false
+    default: 'default'
+  timeout_minutes:
+    description: '作业超时时间（分钟），超时后强制清理并标记失败'
+    required: false
+    default: '60'
+  host_volumes:
+    description: '宿主机目录挂载，格式 /host/path1:/container/path1,/host/path2:/container/path2（逗号分隔，留空不挂载）。默认挂载 /nas_aisw 和 /mnt/wl_nas，无需重复指定；若传入相同容器路径的条目会被自动跳过。'
+    required: false
+    default: ''
+  extra_env:
+    description: '额外环境变量，格式 KEY1=VAL1,KEY2=VAL2（逗号分隔）'
+    required: false
+    default: ''
+  master_port:
+    description: 'rendezvous / 分布式通信端口'
+    required: false
+    default: '29500'
+  cleanup_policy:
+    description: >-
+      清理策略：always（默认）总是清理 / on_success 仅作业成功时清理，失败时保留 Pod 供调试 / never 从不清理。
+    required: false
+    default: 'always'
+  source_dir:
+    description: >-
+      PPU pod 内源码解压路径（默认 /workspace/source）。若 workflow 中已使用 actions/checkout，
+      本 action 会自动将 $GITHUB_WORKSPACE 打包暂存到 NAS，并在 command 前自动解压到此路径，
+      供 PPU worker pod 访问。
+    required: false
+    default: '/workspace/source'
+  node_selector:
+    description: >-
+      节点选择器，格式 KEY1=VAL1,KEY2=VAL2（逗号分隔），合并进 pod 的 spec.nodeSelector，
+      把作业定向到带对应标签的节点（与基础标签 ack.node.ppu.schedule 叠加，AND 硬约束）。
+    required: false
+    default: ''
+  container_options:
+    description: >-
+      容器运行时选项（YAML 片段，可多行）。支持的键：privileged: true/false
+      （映射容器 securityContext.privileged）；host_ipc: true/false（映射 pod spec.hostIPC）；
+      host_network: true/false（映射 pod spec.hostNetwork，置 true 时 dnsPolicy 自动补为
+      ClusterFirstWithHostNet，否则注入的 MASTER_ADDR 无法解析）；dns_policy:
+      "ClusterFirst" / "ClusterFirstWithHostNet" / "Default"（映射 pod spec.dnsPolicy，
+      显式指定时覆盖上述自动补齐）；shm_size: "8Gi"
+      （映射 /dev/shm emptyDir 的 sizeLimit，默认 64Gi）；cap_add: "SYS_PTRACE,IPC_LOCK"
+      （映射 securityContext.capabilities.add，逗号分隔）。留空时使用安全默认值，行为不变。
+    required: false
+    default: ''
+  artifact_paths:
+    description: |
+      Extra paths to stage to NAS alongside source code (one per line).
+      Files at these paths will be available in the PPU pod under source_dir.
+      Typically used for artifacts downloaded by actions/download-artifact.
+      Paths relative to GITHUB_WORKSPACE are also supported.
+    required: false
+    default: ''
+
+outputs:
+  job_name:
+    description: '作业标识名'
+    value: ${{ steps.submit.outputs.job_name }}
+  job_status:
+    description: '最终作业状态：Completed / Failed / Timeout'
+    value: ${{ steps.submit.outputs.job_status }}
+  duration_seconds:
+    description: '作业运行时长（秒）'
+    value: ${{ steps.submit.outputs.duration_seconds }}
+  task_pods:
+    description: '所有 task pod 名称（逗号分隔）'
+    value: ${{ steps.submit.outputs.task_pods }}
+  log_artifact_name:
+    description: '上传的日志 artifact 名称'
+    value: ${{ steps.submit.outputs.log_artifact_name }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup kubectl
+      shell: bash
+      run: |
+        echo "::group::检测并按需安装 kubectl"
+        # 优先检查 hostPath 挂载的 /opt/bin/kubectl（由集群预置）
+        if [ -x /opt/bin/kubectl ]; then
+          export PATH="/opt/bin:$PATH"
+          echo "✓ kubectl 已通过 hostPath 挂载就绪：/opt/bin/kubectl"
+          kubectl version --client 2>/dev/null || true
+        elif command -v kubectl >/dev/null 2>&1; then
+          echo "✓ kubectl 已存在，跳过安装：$(command -v kubectl)"
+        else
+          echo "未检测到 kubectl，开始动态下载安装"
+          stable_version="$(curl -L -s --connect-timeout 5 --max-time 15 https://dl.k8s.io/release/stable.txt 2>/dev/null || echo 'v1.31.0')"
+          official_url="https://dl.k8s.io/release/${stable_version}/bin/linux/amd64/kubectl"
+          echo "下载版本 ${stable_version} 从 ${official_url}"
+          download_ok=false
+          for attempt in 1 2 3; do
+            echo "尝试 #${attempt}..."
+            if curl --fail -L --connect-timeout 10 --max-time 120 --retry 2 -o /tmp/kubectl "${official_url}"; then
+              download_ok=true
+              break
+            fi
+            echo "下载失败，等待 5s 后重试..."
+            sleep 5
+          done
+          if [ "$download_ok" != "true" ]; then
+            echo "::error::kubectl 下载失败（已重试 3 次）"
+            exit 1
+          fi
+          # 验证下载的是 ELF 二进制而非 HTML 错误页
+          if ! file /tmp/kubectl | grep -q ELF; then
+            echo "::error::下载的文件不是有效的 ELF 二进制"
+            file /tmp/kubectl
+            head -c 200 /tmp/kubectl
+            exit 1
+          fi
+          chmod +x /tmp/kubectl
+          if install -m 0755 /tmp/kubectl /usr/local/bin/kubectl 2>/dev/null; then
+            echo "✓ 已安装到 /usr/local/bin/kubectl"
+          else
+            mkdir -p "$HOME/.local/bin"
+            mv /tmp/kubectl "$HOME/.local/bin/kubectl"
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.local/bin:$PATH"
+            echo "✓ 无 /usr/local/bin 写权限，已安装到 $HOME/.local/bin/kubectl 并加入 GITHUB_PATH"
+          fi
+        fi
+        echo "--- kubectl version (client) ---"
+        kubectl version --client 2>&1 || true
+        echo "--- kubectl version (server) ---"
+        kubectl version --short 2>&1 || kubectl version 2>&1 | head -5 || echo "(server version 不可用)"
+        echo "::endgroup::"
+
+    - name: Validate inputs and check PodGroup CRD
+      shell: bash
+      env:
+        INPUT_IMAGE: ${{ inputs.image }}
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_NNODES: ${{ inputs.nnodes }}
+      run: |
+        echo "::group::校验 inputs 与 PodGroup 可用性"
+        if [ -z "$INPUT_IMAGE" ]; then
+          echo "::error::输入 'image' 为必填项"
+          exit 1
+        fi
+        if [ -z "$INPUT_COMMAND" ]; then
+          echo "::error::输入 'command' 为必填项"
+          exit 1
+        fi
+        # 仅在 gang 模式下校验 PodGroup CRD（兼容 x-k8s.io 和 volcano 两种实现）
+        if [ "$INPUT_NNODES" != "0" ] && command -v kubectl &> /dev/null; then
+          if kubectl get crd podgroups.scheduling.x-k8s.io &> /dev/null; then
+            echo "✓ PodGroup CRD 校验通过（scheduling.x-k8s.io）"
+          elif kubectl get crd podgroups.scheduling.volcano.sh &> /dev/null; then
+            echo "✓ PodGroup CRD 校验通过（scheduling.volcano.sh，向后兼容）"
+          else
+            echo "::error::PodGroup CRD 未安装（缺少 podgroups.scheduling.x-k8s.io 或 podgroups.scheduling.volcano.sh），无法进行 gang 调度"
+            exit 1
+          fi
+        fi
+        echo "✓ inputs 校验通过"
+        echo "::endgroup::"
+
+    - name: Stage source to NAS
+      shell: bash
+      env:
+        ARTIFACT_PATHS: ${{ inputs.artifact_paths }}
+      run: |
+        echo "::group::暂存源码到 NAS（tar 打包）"
+        STAGE_TARBALL="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/source.tar.gz"
+        STAGE_DIR="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/stage"
+        echo "NAS 暂存 tarball: $STAGE_TARBALL"
+        echo "源码目录:         $GITHUB_WORKSPACE"
+        # 确保父目录存在且可写
+        if [ ! -d "/wl_nas/devops" ]; then
+          echo "::warning::NAS devops 目录不存在，尝试创建..."
+          mkdir -p /wl_nas/devops && chmod 777 /wl_nas/devops
+        fi
+        mkdir -p "$(dirname "$STAGE_TARBALL")"
+        # 拷贝 workspace 到 staging 目录（使用 cp -a 保留权限、时间戳与隐藏文件）
+        mkdir -p "$STAGE_DIR"
+        cp -a "$GITHUB_WORKSPACE/." "$STAGE_DIR/"
+        echo "✓ workspace 已拷贝到 staging 目录"
+        # 处理 artifact_paths：逐行解析，支持绝对路径与相对路径（相对于 GITHUB_WORKSPACE）
+        if [ -n "${ARTIFACT_PATHS:-}" ]; then
+          echo "处理额外的 artifact 路径..."
+          while IFS= read -r _apath; do
+            # 跳过空行和纯空白行
+            [ -z "$(printf '%s' "$_apath" | tr -d '[:space:]')" ] && continue
+            # 去除首尾空白
+            _apath="$(printf '%s' "$_apath" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+            # 解析相对路径为相对于 GITHUB_WORKSPACE
+            if [[ "$_apath" != /* ]]; then
+              _apath="$GITHUB_WORKSPACE/$_apath"
+            fi
+            if [ ! -e "$_apath" ]; then
+              echo "::warning::artifact 路径不存在，已跳过: $_apath"
+              continue
+            fi
+            _basename="$(basename "$_apath")"
+            cp -a "$_apath" "$STAGE_DIR/$_basename"
+            echo "✓ artifact 已拷贝: $_apath → $_basename"
+          done <<< "$ARTIFACT_PATHS"
+        fi
+        # 打包完整 staging 目录为 tarball
+        tar czf "$STAGE_TARBALL" -C "$STAGE_DIR" .
+        # 清理 staging 临时目录（tarball 已生成，仅需保留 tarball）
+        rm -rf "$STAGE_DIR"
+        echo "SOURCE_STAGE_DIR=$STAGE_TARBALL" >> "$GITHUB_ENV"
+        echo "✓ 源码已打包暂存到 NAS: $STAGE_TARBALL ($(du -h "$STAGE_TARBALL" | cut -f1))"
+        echo "::endgroup::"
+
+    - name: Submit pods and wait for completion
+      id: submit
+      shell: bash
+      env:
+        INPUT_NNODES: ${{ inputs.nnodes }}
+        INPUT_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_IMAGE: ${{ inputs.image }}
+        INPUT_NAMESPACE: ${{ inputs.namespace }}
+        INPUT_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        INPUT_HOST_VOLUMES: ${{ inputs.host_volumes }}
+        INPUT_EXTRA_ENV: ${{ inputs.extra_env }}
+        INPUT_MASTER_PORT: ${{ inputs.master_port }}
+        INPUT_CLEANUP_POLICY: ${{ inputs.cleanup_policy }}
+        INPUT_NODE_SELECTOR: ${{ inputs.node_selector }}
+        INPUT_SOURCE_DIR: ${{ inputs.source_dir }}
+        CONTAINER_OPTIONS: ${{ inputs.container_options }}
+        SOURCE_STAGE_DIR: ${{ env.SOURCE_STAGE_DIR }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_JOB_NAME: ${{ github.job }}
+        USER_ENV_JSON: ${{ toJSON(env) }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/submit.sh"
+
+    - name: Cleanup resources
+      if: always()
+      shell: bash
+      env:
+        JOB_NAME: ${{ steps.submit.outputs.job_name }}
+        INPUT_NAMESPACE: ${{ inputs.namespace }}
+        INPUT_NNODES: ${{ inputs.nnodes }}
+        INPUT_CLEANUP_POLICY: ${{ inputs.cleanup_policy }}
+        INPUT_JOB_STATUS: ${{ steps.submit.outputs.job_status }}
+        SOURCE_STAGE_DIR: ${{ env.SOURCE_STAGE_DIR }}
+        GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        GITHUB_JOB_NAME: ${{ github.job }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/cleanup.sh"

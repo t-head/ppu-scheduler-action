@@ -1,0 +1,7 @@
+# k8s-runner: flytiger-eco 组织基础 Runner
+# helm install k8s-runner oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set -n arc-runners -f values-runner-base.yaml
+githubConfigUrl: "https://github.com/flytiger-eco"
+githubConfigSecret: arc-github-app-secret
+runnerScaleSetName: "k8s-runner-group"
+minRunners: 0
+maxRunners: 16

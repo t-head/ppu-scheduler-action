@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hook-extension-cpu
+  namespace: arc-runners
+data:
+  pod-template.yaml: |
+    spec:
+      serviceAccountName: arc-runner-cpu
+      nodeSelector:
+        server-type: cpu
+      containers:
+        - name: "$job"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PATH
+              value: "/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: http_proxy
+              value: "<PROXY_URL>"  # 替换为实际代理地址，如 http://proxy.example.com:3128
+            - name: https_proxy
+              value: "<PROXY_URL>"
+            - name: HTTP_PROXY
+              value: "<PROXY_URL>"
+            - name: HTTPS_PROXY
+              value: "<PROXY_URL>"
+            - name: no_proxy
+              value: "<NO_PROXY>"  # 替换为实际免代理列表，如 localhost,127.0.0.1,10.244.0.0/16,10.96.0.0/12,.svc.cluster.local
+            - name: NO_PROXY
+              value: "<NO_PROXY>"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "2000m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: host-kubectl
+              mountPath: /opt/bin
+              readOnly: true
+            - name: wl-nas
+              mountPath: /wl_nas
+      volumes:
+        - name: host-kubectl
+          hostPath:
+            path: /opt/bin
+            type: Directory
+        - name: wl-nas
+          hostPath:
+            path: /wl_nas
+            type: Directory

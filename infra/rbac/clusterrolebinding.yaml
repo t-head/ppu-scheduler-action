@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ppu-scheduler-cluster-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ppu-scheduler-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: arc-runner-cpu
+    namespace: arc-runners
