@@ -1,0 +1,28 @@
+# k8s-runner-cpu-flytiger: flytiger-eco 组织 CPU Runner
+# 使用 kubernetes-novolume container mode + hook-extension-cpu ConfigMap
+# helm install k8s-runner-cpu-flytiger oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set -n arc-runners -f values-cpu-flytiger.yaml
+githubConfigUrl: "https://github.com/flytiger-eco"
+githubConfigSecret: arc-github-app-secret-flytiger
+runnerScaleSetName: "k8s-runner-group-cpu-flytiger"
+minRunners: 0
+maxRunners: 64
+containerMode:
+  type: kubernetes-novolume
+template:
+  spec:
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command:
+          - /home/runner/run.sh
+        env:
+          - name: ACTIONS_RUNNER_CONTAINER_HOOK_TEMPLATE
+            value: /home/runner/hooks/pod-template.yaml
+        volumeMounts:
+          - name: hook-extension-cpu
+            mountPath: /home/runner/hooks/pod-template.yaml
+            subPath: pod-template.yaml
+    volumes:
+      - name: hook-extension-cpu
+        configMap:
+          name: hook-extension-cpu

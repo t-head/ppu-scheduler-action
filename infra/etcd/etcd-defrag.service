@@ -1,0 +1,8 @@
+[Unit]
+Description=etcd defrag / NOSPACE recovery
+After=kubelet.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/etcd-defrag.sh
+TimeoutStartSec=600

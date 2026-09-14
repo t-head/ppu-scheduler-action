@@ -1,0 +1,293 @@
+name: Composite Action Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduler-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  WORKER_IMAGE: ${{ vars.PPU_TEST_IMAGE }}
+  TEST_NAMESPACE: ppu-sched
+  SMOKE_COMMAND: |
+    set -euo pipefail
+    test -f /workspace/source/action.yml
+    test -f /workspace/source/README.md
+    test -d /nas_aisw
+    test -d /mnt/wl_nas
+    printf 'rank=%s node_rank=%s world_size=%s nodes=%s cards=%s\n' "$RANK" "$NODE_RANK" "$WORLD_SIZE" "$NNODES" "$NPROC_PER_NODE"
+    ppu-smi
+    sleep 30
+
+jobs:
+  checks:
+    name: Check action sources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch source
+        uses: actions/checkout@v4
+
+      - name: Inspect action definition
+        shell: bash
+        run: |
+          ruby <<'RUBY'
+          require "yaml"
+
+          action = YAML.safe_load(File.read("action.yml"), aliases: true)
+          abort "expected runs.using to be composite" unless action.dig("runs", "using") == "composite"
+          composite_steps = action.dig("runs", "steps")
+          abort "expected at least one composite step" unless composite_steps.is_a?(Array) && composite_steps.any?
+
+          %w[command image].each do |name|
+            abort "expected #{name} to be required" unless action.dig("inputs", name, "required") == true
+          end
+          RUBY
+
+      - name: Parse Bash scripts
+        shell: bash
+        run: |
+          while IFS= read -r file; do
+            printf 'Parsing %s\n' "$file"
+            bash -n "$file"
+          done < <(git ls-files '*.sh')
+
+      - name: Verify generated names
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          first=$(env GITHUB_REPOSITORY_OWNER=t-head GITHUB_JOB_NAME=integration GITHUB_RUN_ID=654321 GITHUB_RUN_ATTEMPT=2 PPU_RUNNER_NAME=ppu-runner-01 MATRIX_JSON='{"suite":"distributed"}' bash scripts/job-name.sh)
+          duplicate=$(env GITHUB_REPOSITORY_OWNER=t-head GITHUB_JOB_NAME=integration GITHUB_RUN_ID=654321 GITHUB_RUN_ATTEMPT=2 PPU_RUNNER_NAME=ppu-runner-01 MATRIX_JSON='{"suite":"distributed"}' bash scripts/job-name.sh)
+          concurrent=$(env GITHUB_REPOSITORY_OWNER=t-head GITHUB_JOB_NAME=integration GITHUB_RUN_ID=654321 GITHUB_RUN_ATTEMPT=2 PPU_RUNNER_NAME=ppu-runner-02 MATRIX_JSON='{"suite":"distributed"}' bash scripts/job-name.sh)
+
+          test "$first" = "$duplicate"
+          test "$first" != "$concurrent"
+          [[ "$first" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?-[a-f0-9]{6}$ ]]
+          test "${#first}" -le 52
+
+  accelerator-smoke:
+    name: Exercise ${{ matrix.label }}
+    needs: checks
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - label: one 890P card
+            nodes: 0
+            devices: 1
+            board_type: ZW-M890P
+          - label: eight 890P cards
+            nodes: 0
+            devices: 8
+            board_type: ZW-M890P
+          - label: two 890P workers
+            nodes: 2
+            devices: 8
+            board_type: ZW-M890P
+          - label: one 810E card
+            nodes: 0
+            devices: 1
+            board_type: OAM-810E
+          - label: eight 810E cards
+            nodes: 0
+            devices: 8
+            board_type: OAM-810E
+    runs-on: k8s-runner-group-cpu-thead
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    steps:
+      - name: Fetch this revision
+        uses: actions/checkout@v4
+
+      - name: Launch ${{ matrix.label }} workload
+        id: smoke
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: ${{ matrix.nodes }}
+          nproc_per_node: ${{ matrix.devices }}
+          node_selector: board-type=${{ matrix.board_type }}
+          dmesg_policy: always
+          timeout_minutes: 10
+          command: ${{ env.SMOKE_COMMAND }}
+
+      - name: Assert reported results
+        shell: bash
+        env:
+          REPORTED_NAME: ${{ steps.smoke.outputs.job_name }}
+          REPORTED_STATUS: ${{ steps.smoke.outputs.job_status }}
+          REPORTED_PODS: ${{ steps.smoke.outputs.task_pods }}
+        run: |
+          printf 'name=%s status=%s pods=%s\n' "$REPORTED_NAME" "$REPORTED_STATUS" "$REPORTED_PODS"
+          [ -n "$REPORTED_NAME" ]
+          [ "$REPORTED_STATUS" = succeeded ]
+
+  default-limit-check:
+    name: Inspect ${{ matrix.board_type }} limits
+    needs: accelerator-smoke
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - board_type: ZW-M890P
+            expected_cores: 31
+            expected_gib: 256
+          - board_type: OAM-810E
+            expected_cores: 11
+            expected_gib: 112
+    runs-on: k8s-runner-group-cpu-thead
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    steps:
+      - name: Fetch this revision
+        uses: actions/checkout@v4
+
+      - name: Read enforced cgroup limits
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: 0
+          nproc_per_node: 1
+          job_suffix: limits-${{ matrix.board_type }}
+          node_selector: board-type=${{ matrix.board_type }}
+          dmesg_policy: always
+          timeout_minutes: 10
+          command: |
+            ${{ env.SMOKE_COMMAND }}
+            python3 - <<'PY'
+            from pathlib import Path
+
+            cores = ${{ matrix.expected_cores }}
+            memory_bytes = ${{ matrix.expected_gib }} * 1024**3
+
+            if Path("/sys/fs/cgroup/cpu.max").exists():
+                quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+            else:
+                quota = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text().strip()
+                period = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text().strip()
+            if quota == "max" or int(quota) / int(period) != cores:
+                raise SystemExit(f"unexpected CPU limit: cores={cores}, quota={quota}, period={period}")
+
+            if Path("/sys/fs/cgroup/memory.max").exists():
+                actual_memory = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+            else:
+                actual_memory = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes").read_text().strip()
+            if actual_memory == "max" or int(actual_memory) != memory_bytes:
+                raise SystemExit(f"unexpected memory limit: expected={memory_bytes}, actual={actual_memory}")
+            PY
+
+  capacity-block-check:
+    name: Reject an unavailable 8-node 810E allocation
+    needs: default-limit-check
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: k8s-runner-group-cpu-thead
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    steps:
+      - name: Fetch this revision
+        uses: actions/checkout@v4
+
+      - name: Submit oversized 810E gang
+        id: blocked_allocation
+        continue-on-error: true
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: 8
+          nproc_per_node: 16
+          node_selector: board-type=OAM-810E
+          dmesg_policy: on_failure
+          timeout_minutes: 3
+          command: echo 'An unavailable allocation unexpectedly started' && exit 1
+
+      - name: Require the expected timeout
+        shell: bash
+        env:
+          ALLOCATION_OUTCOME: ${{ steps.blocked_allocation.outcome }}
+          ALLOCATION_STATUS: ${{ steps.blocked_allocation.outputs.job_status }}
+        run: |
+          printf 'outcome=%s status=%s\n' "$ALLOCATION_OUTCOME" "$ALLOCATION_STATUS"
+          [ "$ALLOCATION_OUTCOME" = failure ]
+          [ "$ALLOCATION_STATUS" = timeout ]
+
+  build-fixture:
+    name: Create transfer fixture
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch source
+        uses: actions/checkout@v4
+
+      - name: Create marker
+        shell: bash
+        run: |
+          mkdir -p transfer-fixture
+          printf 'scheduler-action-checks\n' > transfer-fixture/marker.txt
+
+      - name: Store marker
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduler-action-transfer-fixture
+          path: transfer-fixture/
+
+  staging-check:
+    name: Check staging with ${{ matrix.label }}
+    needs:
+      - capacity-block-check
+      - build-fixture
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - label: a single card
+            nodes: 0
+            devices: 1
+          - label: two workers
+            nodes: 2
+            devices: 8
+    runs-on: k8s-runner-group-cpu-thead
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    steps:
+      - name: Fetch this revision
+        uses: actions/checkout@v4
+
+      - name: Restore marker outside the checkout
+        uses: actions/download-artifact@v4
+        with:
+          name: scheduler-action-transfer-fixture
+          path: ${{ runner.temp }}/restored-fixture
+
+      - name: Inspect staged repository and marker
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: ${{ matrix.nodes }}
+          nproc_per_node: ${{ matrix.devices }}
+          node_selector: board-type=ZW-M890P
+          dmesg_policy: always
+          timeout_minutes: 10
+          artifact_paths: ${{ runner.temp }}/restored-fixture
+          command: |
+            set -euo pipefail
+            test -f /workspace/source/action.yml
+            test -f /workspace/source/README.md
+            test -f /workspace/source/restored-fixture/marker.txt
+            grep -qx scheduler-action-checks /workspace/source/restored-fixture/marker.txt
+            ppu-smi
