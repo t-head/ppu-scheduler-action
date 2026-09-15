@@ -128,12 +128,6 @@ PROXY_ENV_YAML=""
 for _proxy_var in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY; do
   _proxy_val="${!_proxy_var:-}"
   if [ -n "$_proxy_val" ]; then
-    # 对 no_proxy/NO_PROXY 追加 pkg.flytiger-eco.com，绕过代理直连 Artifactory
-    if [[ "$_proxy_var" == "no_proxy" || "$_proxy_var" == "NO_PROXY" ]]; then
-      if [[ "$_proxy_val" != *"pkg.flytiger-eco.com"* ]]; then
-        _proxy_val="${_proxy_val},pkg.flytiger-eco.com"
-      fi
-    fi
     _proxy_val=$(yaml_escape_value "$_proxy_val")
     PROXY_ENV_YAML+="        - name: ${_proxy_var}"$'\n'
     PROXY_ENV_YAML+="          value: \"${_proxy_val}\""$'\n'
@@ -493,10 +487,6 @@ spec:
   restartPolicy: Never
 ${NODE_SELECTOR_YAML}
 ${POD_LEVEL_OPTIONS_YAML}
-  hostAliases:
-  - ip: "121.40.79.29"
-    hostnames:
-    - "pkg.flytiger-eco.com"
   dnsConfig:
     options:
     - name: ndots
