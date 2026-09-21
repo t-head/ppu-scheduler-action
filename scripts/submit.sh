@@ -554,6 +554,30 @@ done
 
 log_info "所有 ${NNODES} 个 worker Pod 已提交"
 
+# --- 写入任务记录到 NAS ---
+{
+  TASK_DIR="/wl_nas/devops/ppu-dashboard/tasks"
+  mkdir -p "$TASK_DIR" 2>/dev/null || true
+  TASK_FILE="${TASK_DIR}/${JOB_NAME}.json"
+  cat > "$TASK_FILE" <<TASK_EOF
+{
+  "run_id": "${RUN_ID}",
+  "run_attempt": "${RUN_ATTEMPT}",
+  "repo": "${GITHUB_REPOSITORY}",
+  "job_name": "${JOB_NAME}",
+  "github_job": "${GITHUB_JOB_NAME}",
+  "pod_name": "${JOB_NAME}-worker-0",
+  "namespace": "${NAMESPACE}",
+  "ppu_per_node": ${NPROC},
+  "nnodes": ${NNODES},
+  "ppu_total": $(( NNODES * NPROC )),
+  "start_time": "$(date +%Y-%m-%dT%H:%M:%S%z)",
+  "status": "running"
+}
+TASK_EOF
+  log_info "任务记录已写入: ${TASK_FILE}"
+} 2>/dev/null || true
+
 # --- 打印各 Pod 调度节点 ---
 sleep 5
 for i in $(seq 0 $(( NNODES - 1 ))); do

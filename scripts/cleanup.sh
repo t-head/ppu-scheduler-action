@@ -41,6 +41,18 @@ fi
 
 log_info "执行全量清理: $JOB_NAME (namespace=$NAMESPACE)"
 
+# --- 更新任务记录 ---
+TASK_DIR="/wl_nas/devops/ppu-dashboard/tasks"
+TASK_FILE="${TASK_DIR}/${JOB_NAME}.json"
+if [ -f "$TASK_FILE" ] && command -v jq >/dev/null 2>&1; then
+  TASK_STATUS="${INPUT_JOB_STATUS:-unknown}"
+  TASK_END_TIME="$(date +%Y-%m-%dT%H:%M:%S%z)"
+  jq --arg end_time "$TASK_END_TIME" --arg status "$TASK_STATUS" \
+    '.end_time = $end_time | .status = $status' \
+    "$TASK_FILE" > "${TASK_FILE}.tmp" && mv "${TASK_FILE}.tmp" "$TASK_FILE"
+  log_info "任务记录已更新: ${TASK_FILE}"
+fi
+
 POD_SELECTOR="ppu-job=$JOB_NAME"
 
 # 带重试的 delete（应对 etcd NOSPACE 等暂时性故障）
