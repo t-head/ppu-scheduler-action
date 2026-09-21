@@ -568,7 +568,7 @@ POD_W0="${JOB_NAME}-worker-0"
   while ! kubectl logs "$POD_W0" -n "$NAMESPACE" -f 2>/dev/null; do
     sleep 3
   done
-) | sed "s/^/[worker-0] /" &
+) | sed -u "s/^/[worker-0] /" &
 LOG_PID=$!
 START_TIME=$(date +%s)
 FINAL_STATUS="timeout"
