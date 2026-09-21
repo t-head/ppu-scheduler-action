@@ -242,7 +242,19 @@ runs:
         # 打包完整 staging 目录为 tarball
         tar czf "$STAGE_TARBALL" -C "$STAGE_DIR" .
         # 清理 staging 临时目录（tarball 已生成，仅需保留 tarball）
-        rm -rf "$STAGE_DIR"
+        # NFS 上 rm -rf 可能因 silly rename (.nfs* 文件) 暂时失败，加重试容错
+        _rm_ok=false
+        for _retry in 1 2 3; do
+          if rm -rf "$STAGE_DIR" 2>/dev/null; then
+            _rm_ok=true
+            break
+          fi
+          echo "::warning::staging 目录清理失败（第 ${_retry} 次），等待 2s 后重试..."
+          sleep 2
+        done
+        if [ "$_rm_ok" != "true" ]; then
+          echo "::warning::staging 目录清理不完整（NFS 延迟），将由 cleanup 步骤兜底"
+        fi
         echo "SOURCE_STAGE_DIR=$STAGE_TARBALL" >> "$GITHUB_ENV"
         echo "✓ 源码已打包暂存到 NAS: $STAGE_TARBALL ($(du -h "$STAGE_TARBALL" | cut -f1))"
         echo "::endgroup::"
