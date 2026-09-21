@@ -678,25 +678,6 @@ log_info "Status:   $FINAL_STATUS"
 log_info "Duration: ${DURATION}s"
 log_info "Pods:     $TASK_PODS"
 
-if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-  STATUS_ICON="❌ ${FINAL_STATUS}"
-  [ "$FINAL_STATUS" = "succeeded" ] && STATUS_ICON="✅ succeeded"
-  cat >> "$GITHUB_STEP_SUMMARY" <<SUMMARY_EOF
-## 🚀 PPU 分布式训练结果
-
-| 字段 | 值 |
-|------|-----|
-| **Job Name** | \`${JOB_NAME}\` |
-| **Status** | ${STATUS_ICON} |
-| **Duration** | ${DURATION}s |
-| **Nodes** | ${NNODES} |
-| **PPU/Node** | ${NPROC} |
-| **Total PPU** | $(( NNODES * NPROC )) |
-| **Image** | \`${IMAGE}\` |
-| **Cleanup Policy** | ${CLEANUP_POLICY} |
-SUMMARY_EOF
-fi
-
 if [ "$FINAL_STATUS" != "succeeded" ]; then
   exit 1
 fi
