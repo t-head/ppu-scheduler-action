@@ -10,5 +10,5 @@ rules:
     resources: ["podgroups"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "services", "events"]
+    resources: ["pods", "pods/log", "services", "events", "nodes"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
