@@ -86,6 +86,13 @@ inputs:
       Paths relative to GITHUB_WORKSPACE are also supported.
     required: false
     default: ''
+  job_suffix:
+    description: >-
+      自定义作业后缀，用于区分同一 job 定义下的多个 matrix 变体。
+      若不传，默认使用 github.job（同一 job 的所有 matrix 变体相同）。
+      matrix 场景建议传入如 matrix.runner 等值以避免资源命名冲突。
+    required: false
+    default: ''
 
 outputs:
   job_name:
@@ -262,6 +269,7 @@ runs:
         GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_JOB_NAME: ${{ github.job }}
+        INPUT_JOB_SUFFIX: ${{ inputs.job_suffix }}
         USER_ENV_JSON: ${{ toJSON(env) }}
       run: bash "$GITHUB_ACTION_PATH/scripts/submit.sh"
 

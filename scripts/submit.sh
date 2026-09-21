@@ -79,7 +79,12 @@ fi
 OWNER=$(sanitize_name "${GITHUB_REPOSITORY_OWNER:-unknown}" | cut -c1-20 | sed 's/-*$//')
 RUN_ID="${GITHUB_RUN_ID:-0}"
 RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
-JOB_SUFFIX=$(sanitize_name "${GITHUB_JOB_NAME:-job}" | cut -c1-20 | sed 's/-*$//')
+# 优先使用用户传入的 job_suffix（解决 matrix 场景 github.job 相同导致命名冲突）
+if [ -n "${INPUT_JOB_SUFFIX:-}" ]; then
+  JOB_SUFFIX=$(sanitize_name "$INPUT_JOB_SUFFIX" | cut -c1-20 | sed 's/-*$//')
+else
+  JOB_SUFFIX=$(sanitize_name "${GITHUB_JOB_NAME:-job}" | cut -c1-20 | sed 's/-*$//')
+fi
 JOB_NAME="ppu-${OWNER}-${RUN_ID}-${RUN_ATTEMPT}-${JOB_SUFFIX}"
 JOB_NAME=$(echo "$JOB_NAME" | cut -c1-63 | sed 's/-*$//')
 set_output "job_name" "$JOB_NAME"
@@ -677,6 +682,13 @@ log_info "Job:      $JOB_NAME"
 log_info "Status:   $FINAL_STATUS"
 log_info "Duration: ${DURATION}s"
 log_info "Pods:     $TASK_PODS"
+
+# 直接更新任务记录终态（不依赖 cleanup.sh 的 output 传递）
+if [ -f "${TASK_FILE:-}" ] && command -v jq >/dev/null 2>&1; then
+  jq --arg end_time "$(date +%Y-%m-%dT%H:%M:%S%z)" --arg status "$FINAL_STATUS" \
+    '.end_time = $end_time | .status = $status' "$TASK_FILE" > "${TASK_FILE}.tmp" && mv "${TASK_FILE}.tmp" "$TASK_FILE"
+  log_info "任务记录已更新终态: ${TASK_FILE}"
+fi
 
 if [ "$FINAL_STATUS" != "succeeded" ]; then
   exit 1
