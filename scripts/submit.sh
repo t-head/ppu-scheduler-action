@@ -397,7 +397,7 @@ if [ -n "$SOURCE_STAGE_DIR" ]; then
   else
     TARBALL_PATH_IN_POD="$SOURCE_STAGE_DIR"
   fi
-  EXTRACT_CMD="mkdir -p ${SOURCE_MOUNT_PATH} && tar xzf ${TARBALL_PATH_IN_POD} -C ${SOURCE_MOUNT_PATH} && echo '✓ 源码已解压到 ${SOURCE_MOUNT_PATH}'"
+  EXTRACT_CMD="mkdir -p ${SOURCE_MOUNT_PATH} && tar xzf ${TARBALL_PATH_IN_POD} -C ${SOURCE_MOUNT_PATH} && cd ${SOURCE_MOUNT_PATH} && echo '✓ 源码已解压到 ${SOURCE_MOUNT_PATH}'"
   COMMAND="${EXTRACT_CMD} && ${COMMAND}"
   log_info "源码 tarball 解压注入: ${TARBALL_PATH_IN_POD} → ${SOURCE_MOUNT_PATH}"
 fi
