@@ -97,20 +97,22 @@ if [ -n "${INPUT_JOB_SUFFIX:-}" ]; then
   JOB_SUFFIX=$(sanitize_name "$INPUT_JOB_SUFFIX" | cut -c1-20 | sed 's/-*$//')
 else
   JOB_SUFFIX=$(sanitize_name "${GITHUB_JOB_NAME:-job}" | cut -c1-20 | sed 's/-*$//')
-  # 自动检测 matrix 场景：从 MATRIX_JSON 提取第一个 value 作为后缀，避免同 job 不同 matrix variant 的 Pod 名称冲突
+  # 自动检测 matrix 场景：第一个 value 截短 + matrix JSON 短 hash，既可读又不超限
   if [ -n "${MATRIX_JSON:-}" ] && [ "$MATRIX_JSON" != "null" ] && [ "$MATRIX_JSON" != "{}" ]; then
     MATRIX_SUFFIX=$(echo "$MATRIX_JSON" | python3 -c "
-import sys, json
+import sys, json, hashlib
 try:
-    d = json.load(sys.stdin)
+    raw = sys.stdin.read().strip()
+    d = json.loads(raw)
     vals = [str(v) for v in d.values() if v is not None and str(v).strip()]
-    print(vals[0][:16] if vals else '')
+    short_hash = hashlib.md5(raw.encode()).hexdigest()[:4]
+    first_val = vals[0][:8] if vals else ''
+    print(f'{first_val}-{short_hash}' if first_val else short_hash)
 except: print('')
 " 2>/dev/null || echo "")
     if [ -n "$MATRIX_SUFFIX" ]; then
-      MATRIX_SUFFIX=$(sanitize_name "$MATRIX_SUFFIX" | cut -c1-16 | sed 's/-*$//')
+      MATRIX_SUFFIX=$(sanitize_name "$MATRIX_SUFFIX" | cut -c1-14 | sed 's/-*$//')
       JOB_SUFFIX="${JOB_SUFFIX}-${MATRIX_SUFFIX}"
-      JOB_SUFFIX=$(echo "$JOB_SUFFIX" | cut -c1-30 | sed 's/-*$//')
     fi
   fi
 fi

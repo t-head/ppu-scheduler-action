@@ -24,20 +24,22 @@ if [ -z "$JOB_NAME" ]; then
   _run_id="${GITHUB_RUN_ID:-0}"
   _run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
   _job_suffix=$(sanitize_name "${GITHUB_JOB_NAME:-job}" | cut -c1-20 | sed 's/-*$//')
-  # 同 submit.sh 保持一致：自动检测 matrix 场景拼接后缀
+  # 同 submit.sh 保持一致：第一个 value 截短 + matrix JSON 短 hash
   if [ -n "${MATRIX_JSON:-}" ] && [ "$MATRIX_JSON" != "null" ] && [ "$MATRIX_JSON" != "{}" ]; then
     _matrix_suffix=$(echo "$MATRIX_JSON" | python3 -c "
-import sys, json
+import sys, json, hashlib
 try:
-    d = json.load(sys.stdin)
+    raw = sys.stdin.read().strip()
+    d = json.loads(raw)
     vals = [str(v) for v in d.values() if v is not None and str(v).strip()]
-    print(vals[0][:16] if vals else '')
+    short_hash = hashlib.md5(raw.encode()).hexdigest()[:4]
+    first_val = vals[0][:8] if vals else ''
+    print(f'{first_val}-{short_hash}' if first_val else short_hash)
 except: print('')
 " 2>/dev/null || echo "")
     if [ -n "$_matrix_suffix" ]; then
-      _matrix_suffix=$(sanitize_name "$_matrix_suffix" | cut -c1-16 | sed 's/-*$//')
+      _matrix_suffix=$(sanitize_name "$_matrix_suffix" | cut -c1-14 | sed 's/-*$//')
       _job_suffix="${_job_suffix}-${_matrix_suffix}"
-      _job_suffix=$(echo "$_job_suffix" | cut -c1-30 | sed 's/-*$//')
     fi
   fi
   JOB_NAME="ppu-${_owner}-${_run_id}-${_run_attempt}-${_job_suffix}"
