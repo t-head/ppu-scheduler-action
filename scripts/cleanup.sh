@@ -24,6 +24,22 @@ if [ -z "$JOB_NAME" ]; then
   _run_id="${GITHUB_RUN_ID:-0}"
   _run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
   _job_suffix=$(sanitize_name "${GITHUB_JOB_NAME:-job}" | cut -c1-20 | sed 's/-*$//')
+  # 同 submit.sh 保持一致：自动检测 matrix 场景拼接后缀
+  if [ -n "${MATRIX_JSON:-}" ] && [ "$MATRIX_JSON" != "null" ] && [ "$MATRIX_JSON" != "{}" ]; then
+    _matrix_suffix=$(echo "$MATRIX_JSON" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    vals = [str(v) for v in d.values() if v is not None and str(v).strip()]
+    print('-'.join(vals)[:20] if vals else '')
+except: print('')
+" 2>/dev/null || echo "")
+    if [ -n "$_matrix_suffix" ]; then
+      _matrix_suffix=$(sanitize_name "$_matrix_suffix" | cut -c1-20 | sed 's/-*$//')
+      _job_suffix="${_job_suffix}-${_matrix_suffix}"
+      _job_suffix=$(echo "$_job_suffix" | cut -c1-40 | sed 's/-*$//')
+    fi
+  fi
   JOB_NAME="ppu-${_owner}-${_run_id}-${_run_attempt}-${_job_suffix}"
   JOB_NAME=$(echo "$JOB_NAME" | cut -c1-63 | sed 's/-*$//')
   log_warn "submit 步骤未输出 job_name，使用兜底计算: $JOB_NAME"
