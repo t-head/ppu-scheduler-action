@@ -205,32 +205,15 @@ runs:
       run: |
         echo "::group::暂存源码到 NAS（tar 打包）"
         STAGE_TARBALL="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/source.tar.gz"
-        STAGE_DIR="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/stage"
         echo "NAS 暂存 tarball: $STAGE_TARBALL"
         echo "源码目录:         $GITHUB_WORKSPACE"
-        # 确保父目录存在且可写
+        # 确保 NAS 目标目录存在且可写
         if [ ! -d "/wl_nas/devops" ]; then
           echo "::warning::NAS devops 目录不存在，尝试创建..."
           mkdir -p /wl_nas/devops && chmod 777 /wl_nas/devops
         fi
         mkdir -p "$(dirname "$STAGE_TARBALL")"
-        # 拷贝 workspace 到 staging 目录（使用 cp -a 保留权限、时间戳与隐藏文件）
-        # 清理可能残留的 stage 目录（job re-queue 场景下可能遗留只读文件）
-        # NFSv3 silly rename 可能导致 rm -rf 失败，使用 mv 重命名后后台清理
-        if [ -d "$STAGE_DIR" ]; then
-          echo "::warning::检测到残留 stage 目录，先清理..."
-          chmod -R u+w "$STAGE_DIR" 2>/dev/null || true
-          _removing="${STAGE_DIR}.removing.$$"
-          if mv "$STAGE_DIR" "$_removing" 2>/dev/null; then
-            rm -rf "$_removing" 2>/dev/null &
-          else
-            rm -rf "$STAGE_DIR" 2>/dev/null || true
-          fi
-        fi
-        mkdir -p "$STAGE_DIR"
-        cp -a "$GITHUB_WORKSPACE/." "$STAGE_DIR/"
-        echo "✓ workspace 已拷贝到 staging 目录"
-        # 处理 artifact_paths：逐行解析，支持绝对路径与相对路径（相对于 GITHUB_WORKSPACE）
+        # 处理 artifact_paths：将额外 artifact 拷贝到 workspace 内，一起打包
         if [ -n "${ARTIFACT_PATHS:-}" ]; then
           echo "处理额外的 artifact 路径..."
           while IFS= read -r _apath; do
@@ -247,26 +230,20 @@ runs:
               continue
             fi
             _basename="$(basename "$_apath")"
-            cp -a "$_apath" "$STAGE_DIR/$_basename"
-            echo "✓ artifact 已拷贝: $_apath → $_basename"
+            # 仅当 artifact 不在 workspace 内时才拷贝
+            if [ ! -e "$GITHUB_WORKSPACE/$_basename" ]; then
+              cp -a "$_apath" "$GITHUB_WORKSPACE/$_basename"
+              echo "✓ artifact 已拷贝到 workspace: $_apath → $_basename"
+            else
+              echo "✓ artifact 已在 workspace 中: $_basename"
+            fi
           done <<< "$ARTIFACT_PATHS"
         fi
-        # 打包完整 staging 目录为 tarball
-        tar czf "$STAGE_TARBALL" -C "$STAGE_DIR" .
-        # 清理 staging 临时目录（tarball 已生成，仅需保留 tarball）
-        # NFS 上 rm -rf 可能因 silly rename (.nfs* 文件) 暂时失败，加重试容错
-        _rm_ok=false
-        for _retry in 1 2 3; do
-          if rm -rf "$STAGE_DIR" 2>/dev/null; then
-            _rm_ok=true
-            break
-          fi
-          echo "::warning::staging 目录清理失败（第 ${_retry} 次），等待 2s 后重试..."
-          sleep 2
-        done
-        if [ "$_rm_ok" != "true" ]; then
-          echo "::warning::staging 目录清理不完整（NFS 延迟），将由 cleanup 步骤兜底"
-        fi
+        # 在本地 workspace 直接打包，然后 copy 到 NAS（避免 NFS 上大量文件操作和 silly rename）
+        _local_tarball="/tmp/source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
+        tar czf "$_local_tarball" -C "$GITHUB_WORKSPACE" .
+        cp "$_local_tarball" "$STAGE_TARBALL"
+        rm -f "$_local_tarball"
         echo "SOURCE_STAGE_DIR=$STAGE_TARBALL" >> "$GITHUB_ENV"
         echo "✓ 源码已打包暂存到 NAS: $STAGE_TARBALL ($(du -h "$STAGE_TARBALL" | cut -f1))"
         echo "::endgroup::"
