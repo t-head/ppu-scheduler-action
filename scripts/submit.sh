@@ -505,7 +505,7 @@ ${POD_LEVEL_OPTIONS_YAML}
     - name: worker
       image: ${IMAGE}
       imagePullPolicy: IfNotPresent
-      command: ["/bin/sh", "-c"]
+      command: ["/bin/bash", "-c"]
       args:
         - |
 ${SCRIPT_INDENTED}
