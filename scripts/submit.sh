@@ -19,6 +19,18 @@ set_output() {
   fi
 }
 
+# --- 预设默认输出（防止脚本异常退出时 cleanup 拿不到 job_status）---
+set_output "job_status" "unknown"
+set_output "duration_seconds" "0"
+
+# --- SIGTERM/SIGINT trap（解决外部取消导致 unknown 状态）---
+_on_signal() {
+  log_warn "收到终止信号，标记任务为 cancelled"
+  set_output "job_status" "cancelled"
+  exit 130
+}
+trap '_on_signal' TERM INT
+
 sanitize_name() {
   echo "$1" \
     | tr '[:upper:]' '[:lower:]' \
@@ -633,11 +645,11 @@ while true; do
 
   TOTAL_PODS=$NNODES
   SUCCEEDED=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" \
-    --field-selector=status.phase=Succeeded -o name 2>/dev/null | wc -l | tr -d ' ')
+    --field-selector=status.phase=Succeeded -o name 2>/dev/null | wc -l | tr -d ' ' || echo 0)
   FAILED=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" \
-    --field-selector=status.phase=Failed -o name 2>/dev/null | wc -l | tr -d ' ')
+    --field-selector=status.phase=Failed -o name 2>/dev/null | wc -l | tr -d ' ' || echo 0)
   RUNNING=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" \
-    --field-selector=status.phase=Running -o name 2>/dev/null | wc -l | tr -d ' ')
+    --field-selector=status.phase=Running -o name 2>/dev/null | wc -l | tr -d ' ' || echo 0)
 
   if [ "$SUCCEEDED" -eq "$TOTAL_PODS" ]; then
     log_info "所有 Pod 执行成功 (succeeded=$SUCCEEDED)"
@@ -654,7 +666,7 @@ while true; do
     PENDING_PODS=$(kubectl get pods -n "$NAMESPACE" \
                      -l "ppu-job=$JOB_NAME" \
                      --field-selector=status.phase=Pending \
-                     -o name 2>/dev/null | wc -l | tr -d ' ')
+                     -o name 2>/dev/null | wc -l | tr -d ' ' || echo 0)
     if [ "${PENDING_PODS:-0}" -gt 0 ]; then
       log_warn "仍有 ${PENDING_PODS} 个 pod 处于 Pending 超过 5 分钟，可能资源不足或调度受阻。"
       echo "::group::FailedScheduling events"
