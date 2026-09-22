@@ -240,6 +240,11 @@ runs:
           done <<< "$ARTIFACT_PATHS"
         fi
         # 在本地 workspace 直接打包，然后 copy 到 NAS（避免 NFS 上大量文件操作和 silly rename）
+        echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+        echo "workspace 顶层内容:"
+        ls -la "$GITHUB_WORKSPACE/" | head -30
+        echo "workspace .github 目录:"
+        ls -la "$GITHUB_WORKSPACE/.github/" 2>/dev/null | head -10 || echo "(.github 目录不存在)"
         _local_tarball="/tmp/source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
         tar czf "$_local_tarball" -C "$GITHUB_WORKSPACE" .
         cp "$_local_tarball" "$STAGE_TARBALL"
