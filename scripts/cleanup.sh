@@ -31,17 +31,17 @@ import sys, json
 try:
     d = json.load(sys.stdin)
     vals = [str(v) for v in d.values() if v is not None and str(v).strip()]
-    print('-'.join(vals)[:20] if vals else '')
+    print(vals[0][:16] if vals else '')
 except: print('')
 " 2>/dev/null || echo "")
     if [ -n "$_matrix_suffix" ]; then
-      _matrix_suffix=$(sanitize_name "$_matrix_suffix" | cut -c1-20 | sed 's/-*$//')
+      _matrix_suffix=$(sanitize_name "$_matrix_suffix" | cut -c1-16 | sed 's/-*$//')
       _job_suffix="${_job_suffix}-${_matrix_suffix}"
-      _job_suffix=$(echo "$_job_suffix" | cut -c1-40 | sed 's/-*$//')
+      _job_suffix=$(echo "$_job_suffix" | cut -c1-30 | sed 's/-*$//')
     fi
   fi
   JOB_NAME="ppu-${_owner}-${_run_id}-${_run_attempt}-${_job_suffix}"
-  JOB_NAME=$(echo "$JOB_NAME" | cut -c1-63 | sed 's/-*$//')
+  JOB_NAME=$(echo "$JOB_NAME" | cut -c1-52 | sed 's/-*$//')
   log_warn "submit 步骤未输出 job_name，使用兜底计算: $JOB_NAME"
 fi
 

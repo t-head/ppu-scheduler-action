@@ -97,25 +97,25 @@ if [ -n "${INPUT_JOB_SUFFIX:-}" ]; then
   JOB_SUFFIX=$(sanitize_name "$INPUT_JOB_SUFFIX" | cut -c1-20 | sed 's/-*$//')
 else
   JOB_SUFFIX=$(sanitize_name "${GITHUB_JOB_NAME:-job}" | cut -c1-20 | sed 's/-*$//')
-  # 自动检测 matrix 场景：从 MATRIX_JSON 提取各 value 拼接为后缀，避免同 job 不同 matrix variant 的 Pod 名称冲突
+  # 自动检测 matrix 场景：从 MATRIX_JSON 提取第一个 value 作为后缀，避免同 job 不同 matrix variant 的 Pod 名称冲突
   if [ -n "${MATRIX_JSON:-}" ] && [ "$MATRIX_JSON" != "null" ] && [ "$MATRIX_JSON" != "{}" ]; then
     MATRIX_SUFFIX=$(echo "$MATRIX_JSON" | python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
     vals = [str(v) for v in d.values() if v is not None and str(v).strip()]
-    print('-'.join(vals)[:20] if vals else '')
+    print(vals[0][:16] if vals else '')
 except: print('')
 " 2>/dev/null || echo "")
     if [ -n "$MATRIX_SUFFIX" ]; then
-      MATRIX_SUFFIX=$(sanitize_name "$MATRIX_SUFFIX" | cut -c1-20 | sed 's/-*$//')
+      MATRIX_SUFFIX=$(sanitize_name "$MATRIX_SUFFIX" | cut -c1-16 | sed 's/-*$//')
       JOB_SUFFIX="${JOB_SUFFIX}-${MATRIX_SUFFIX}"
-      JOB_SUFFIX=$(echo "$JOB_SUFFIX" | cut -c1-40 | sed 's/-*$//')
+      JOB_SUFFIX=$(echo "$JOB_SUFFIX" | cut -c1-30 | sed 's/-*$//')
     fi
   fi
 fi
 JOB_NAME="ppu-${OWNER}-${RUN_ID}-${RUN_ATTEMPT}-${JOB_SUFFIX}"
-JOB_NAME=$(echo "$JOB_NAME" | cut -c1-63 | sed 's/-*$//')
+JOB_NAME=$(echo "$JOB_NAME" | cut -c1-52 | sed 's/-*$//')
 set_output "job_name" "$JOB_NAME"
 
 log_info "Job 名称:   $JOB_NAME"
