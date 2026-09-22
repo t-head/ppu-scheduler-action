@@ -215,6 +215,12 @@ runs:
         fi
         mkdir -p "$(dirname "$STAGE_TARBALL")"
         # 拷贝 workspace 到 staging 目录（使用 cp -a 保留权限、时间戳与隐藏文件）
+        # 清理可能残留的 stage 目录（job re-queue 场景下可能遗留只读文件）
+        if [ -d "$STAGE_DIR" ]; then
+          echo "::warning::检测到残留 stage 目录，先清理..."
+          chmod -R u+w "$STAGE_DIR" 2>/dev/null || true
+          rm -rf "$STAGE_DIR"
+        fi
         mkdir -p "$STAGE_DIR"
         cp -a "$GITHUB_WORKSPACE/." "$STAGE_DIR/"
         echo "✓ workspace 已拷贝到 staging 目录"
