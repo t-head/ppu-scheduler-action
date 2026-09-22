@@ -276,6 +276,7 @@ runs:
         GITHUB_REPOSITORY: ${{ github.repository }}
         GITHUB_JOB_NAME: ${{ github.job }}
         INPUT_JOB_SUFFIX: ${{ inputs.job_suffix }}
+        MATRIX_JSON: ${{ toJSON(matrix) }}
         USER_ENV_JSON: ${{ toJSON(env) }}
       run: bash "$GITHUB_ACTION_PATH/scripts/submit.sh"
 
