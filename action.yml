@@ -202,9 +202,15 @@ runs:
       shell: bash
       env:
         ARTIFACT_PATHS: ${{ inputs.artifact_paths }}
+        MATRIX_JOB_INDEX: ${{ strategy.job-index }}
       run: |
         echo "::group::暂存源码到 NAS（tar 打包）"
-        STAGE_TARBALL="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${GITHUB_JOB}/source.tar.gz"
+        # matrix 场景下用 job-index 区分 tarball 路径，避免多个 variant 互相覆盖
+        _job_dir="${GITHUB_JOB}"
+        if [ -n "${MATRIX_JOB_INDEX:-}" ]; then
+          _job_dir="${GITHUB_JOB}-${MATRIX_JOB_INDEX}"
+        fi
+        STAGE_TARBALL="/wl_nas/devops/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${_job_dir}/source.tar.gz"
         echo "NAS 暂存 tarball: $STAGE_TARBALL"
         echo "源码目录:         $GITHUB_WORKSPACE"
         # 确保 NAS 目标目录存在且可写
