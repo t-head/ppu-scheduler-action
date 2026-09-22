@@ -63,6 +63,7 @@ CONTAINER_OPTIONS="${CONTAINER_OPTIONS:-}"
 DEFAULT_NAS_VOLUMES=(
   "nas-aisw|/nas_aisw|/nas_aisw"
   "wl-nas|/mnt/wl_nas|/wl_nas"
+  "wl-nas-direct|/wl_nas|/wl_nas"
 )
 
 TIMEOUT=$(( TIMEOUT_MINUTES * 60 ))
