@@ -40,6 +40,8 @@ data:
               readOnly: true
             - name: wl-nas
               mountPath: /wl_nas
+            - name: wl-nas
+              mountPath: /mnt/wl_nas
       volumes:
         - name: host-kubectl
           hostPath:
