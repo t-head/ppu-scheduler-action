@@ -302,3 +302,8 @@ runs:
         GITHUB_JOB_NAME: ${{ github.job }}
         MATRIX_JSON: ${{ toJSON(matrix) }}
       run: bash "$GITHUB_ACTION_PATH/scripts/cleanup.sh"
+
+    - name: Report job failure
+      if: always() && steps.submit.outputs.job_status != 'succeeded'
+      shell: bash
+      run: exit 1

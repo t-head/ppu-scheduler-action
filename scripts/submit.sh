@@ -720,7 +720,3 @@ if [ -f "${TASK_FILE:-}" ] && command -v jq >/dev/null 2>&1; then
     '.end_time = $end_time | .status = $status' "$TASK_FILE" > "${TASK_FILE}.tmp" && mv "${TASK_FILE}.tmp" "$TASK_FILE"
   log_info "任务记录已更新终态: ${TASK_FILE}"
 fi
-
-if [ "$FINAL_STATUS" != "succeeded" ]; then
-  exit 1
-fi
