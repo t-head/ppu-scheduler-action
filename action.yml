@@ -75,7 +75,10 @@ inputs:
       "ClusterFirst" / "ClusterFirstWithHostNet" / "Default"（映射 pod spec.dnsPolicy，
       显式指定时覆盖上述自动补齐）；shm_size: "8Gi"
       （映射 /dev/shm emptyDir 的 sizeLimit，默认 64Gi）；cap_add: "SYS_PTRACE,IPC_LOCK"
-      （映射 securityContext.capabilities.add，逗号分隔）。留空时使用安全默认值，行为不变。
+      （映射 securityContext.capabilities.add，逗号分隔）；cpus: "8" / "1.5" / "500m"
+      （别名 cpu，映射容器 resources.limits.cpu）；memory: "64Gi" / "64g"（映射容器
+      resources.limits.memory，docker 小写单位 b/k/m/g/t 按 1024 进制转换为 Ki/Mi/Gi/Ti）。
+      未列出的键会被忽略（K8s 无容器级 swap 限制，不支持 memory_swap）。留空时使用安全默认值，行为不变。
     required: false
     default: ''
   artifact_paths:

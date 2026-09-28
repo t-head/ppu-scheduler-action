@@ -247,6 +247,8 @@ fi
 #   dns_policy:   "ClusterFirstWithHostNet" → pod spec.dnsPolicy
 #   shm_size:     "8Gi"                  → /dev/shm emptyDir sizeLimit（默认 64Gi）
 #   cap_add:      "SYS_PTRACE,IPC_LOCK"  → securityContext.capabilities.add（逗号分隔）
+#   cpus:         "8" / "1.5" / "500m"   → resources.limits.cpu（别名 cpu）
+#   memory:       "64Gi" / "64g"         → resources.limits.memory（docker 小写单位按 1024 进制转换）
 # 留空时全部保持默认，行为与未引入本选项前完全一致。
 PRIVILEGED="false"
 HOST_IPC="false"
@@ -254,6 +256,8 @@ HOST_NETWORK="false"
 DNS_POLICY=""
 SHM_SIZE=""
 CAP_ADD=""
+CPUS=""
+MEMORY=""
 
 # 提取指定键的取值：键名大小写不敏感；值去引号与空白。
 # 注：pipefail 下 grep 无匹配会使管道非零，尾部 || true 兜底，空值由调用方回退默认。
@@ -268,6 +272,8 @@ if [ -n "$CONTAINER_OPTIONS" ]; then
   DNS_POLICY=$(_co_opt_value 'dns_policy')
   SHM_SIZE=$(_co_opt_value 'shm_size')
   CAP_ADD=$(_co_opt_value 'cap_add')
+  CPUS=$(_co_opt_value 'cpus'); [ -z "$CPUS" ] && CPUS=$(_co_opt_value 'cpu')
+  MEMORY=$(_co_opt_value 'memory')
 
   # 布尔值规范化（True/TRUE → true）并校验
   PRIVILEGED=$(printf '%s' "$PRIVILEGED" | tr '[:upper:]' '[:lower:]')
@@ -308,7 +314,30 @@ if [ -n "$CONTAINER_OPTIONS" ]; then
     fi
   fi
 
-  log_info "container_options: privileged=${PRIVILEGED} host_ipc=${HOST_IPC} host_network=${HOST_NETWORK} dns_policy=${DNS_POLICY:-<集群默认>} shm_size=${SHM_SIZE:-64Gi(默认)} cap_add=${CAP_ADD:-<none>}"
+  if [ -n "$CPUS" ]; then
+    if ! [[ "$CPUS" =~ ^([0-9]+(\.[0-9]+)?|[0-9]+m)$ ]]; then
+      log_error "container_options: cpus 不是合法的 CPU 数量（示例: 8、1.5、500m），实际为 '${CPUS}'"
+      exit 1
+    fi
+  fi
+
+  # docker 的 b/k/m/g/t 为 1024 进制，而 K8s 中小写 m 表示 milli，须转换为 Ki/Mi/Gi/Ti
+  if [ -n "$MEMORY" ]; then
+    if [[ "$MEMORY" =~ ^([0-9]+)([bkmgt])$ ]]; then
+      case "${BASH_REMATCH[2]}" in
+        b) MEMORY="${BASH_REMATCH[1]}" ;;
+        k) MEMORY="${BASH_REMATCH[1]}Ki" ;;
+        m) MEMORY="${BASH_REMATCH[1]}Mi" ;;
+        g) MEMORY="${BASH_REMATCH[1]}Gi" ;;
+        t) MEMORY="${BASH_REMATCH[1]}Ti" ;;
+      esac
+    elif ! [[ "$MEMORY" =~ ^[0-9]+(\.[0-9]+)?([KMGTPE]i?|k)?$ ]]; then
+      log_error "container_options: memory 不是合法的内存大小（示例: 64Gi、512Mi、64g），实际为 '${MEMORY}'"
+      exit 1
+    fi
+  fi
+
+  log_info "container_options: privileged=${PRIVILEGED} host_ipc=${HOST_IPC} host_network=${HOST_NETWORK} dns_policy=${DNS_POLICY:-<集群默认>} shm_size=${SHM_SIZE:-64Gi(默认)} cap_add=${CAP_ADD:-<none>} cpus=${CPUS:-<不限>} memory=${MEMORY:-<不限>}"
 fi
 
 # hostNetwork 与默认的 ClusterFirst 组合，会让 pod 拿到宿主 resolver，于是本 action
@@ -340,6 +369,12 @@ if [ -n "$CAP_ADD" ]; then
   done
   CAP_ADD_ITEMS="${CAP_ADD_ITEMS%$'\n'}"
 fi
+
+# 仅设 limits：K8s 会把未声明的 requests 默认为同值，与 docker --cpus/--memory 的硬上限语义一致
+RESOURCE_LIMITS_YAML=""
+[ -n "$CPUS" ] && RESOURCE_LIMITS_YAML+="          cpu: \"${CPUS}\""$'\n'
+[ -n "$MEMORY" ] && RESOURCE_LIMITS_YAML+="          memory: \"${MEMORY}\""$'\n'
+RESOURCE_LIMITS_YAML="${RESOURCE_LIMITS_YAML%$'\n'}"
 
 # 容器级 securityContext 片段（6 空格缩进，与 image/env/resources 同级）
 SECURITY_CONTEXT_YAML=""
@@ -569,6 +604,7 @@ ${EXTRA_ENV_YAML}
           alibabacloud.com/ppu: "${NPROC}"
         limits:
           alibabacloud.com/ppu: "${NPROC}"
+${RESOURCE_LIMITS_YAML}
 ${SECURITY_CONTEXT_YAML}
       volumeMounts:
         - name: dshm
