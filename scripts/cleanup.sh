@@ -23,7 +23,11 @@ if [ -z "$JOB_NAME" ]; then
   _owner=$(sanitize_name "${GITHUB_REPOSITORY_OWNER:-unknown}" | cut -c1-20 | sed 's/-*$//')
   _run_id="${GITHUB_RUN_ID:-0}"
   _run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
-  _job_suffix=$(sanitize_name "${GITHUB_JOB_NAME:-job}" | cut -c1-20 | sed 's/-*$//')
+  if [ -n "${INPUT_JOB_SUFFIX:-}" ]; then
+    _job_suffix=$(sanitize_name "$INPUT_JOB_SUFFIX" | cut -c1-20 | sed 's/-*$//')
+  else
+    _job_suffix=$(sanitize_name "${GITHUB_JOB_NAME:-job}" | cut -c1-20 | sed 's/-*$//')
+  fi
   # 同 submit.sh 保持一致：第一个 value 截短 + matrix JSON 短 hash
   if [ -n "${MATRIX_JSON:-}" ] && [ "$MATRIX_JSON" != "null" ] && [ "$MATRIX_JSON" != "{}" ]; then
     _matrix_suffix=$(echo "$MATRIX_JSON" | python3 -c "

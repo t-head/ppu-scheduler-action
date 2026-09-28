@@ -29,11 +29,11 @@ data:
               value: "<NO_PROXY>"
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "2"
+              memory: "4Gi"
             limits:
-              cpu: "2000m"
-              memory: "1Gi"
+              cpu: "30"
+              memory: "120Gi"
           volumeMounts:
             - name: host-kubectl
               mountPath: /opt/bin

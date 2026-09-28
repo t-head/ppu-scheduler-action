@@ -497,7 +497,7 @@ spec:
 SVC_EOF
 
   log_info "创建 Headless Service: $JOB_NAME"
-  kubectl apply -f "$SVC_MANIFEST"
+  kubectl create -f "$SVC_MANIFEST"
 
   # --- 创建 PodGroup ---
   PG_MANIFEST="$MANIFEST_DIR/podgroup.yaml"
@@ -512,7 +512,7 @@ spec:
 PG_EOF
 
   log_info "创建 PodGroup: $JOB_NAME (minMember=$NNODES)"
-  kubectl apply -f "$PG_MANIFEST"
+  kubectl create -f "$PG_MANIFEST"
 else
   log_info "单卡/多卡模式：跳过 Service/PodGroup 创建"
 fi
@@ -621,7 +621,7 @@ ${HOST_VOLUME_DEFS}
 POD_EOF
 
   log_info "创建 Pod: ${JOB_NAME}-worker-${i}"
-  kubectl apply -f "$POD_MANIFEST"
+  kubectl create -f "$POD_MANIFEST"
 done
 
 log_info "所有 ${NNODES} 个 worker Pod 已提交"
