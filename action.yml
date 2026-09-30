@@ -78,7 +78,10 @@ inputs:
       （映射 securityContext.capabilities.add，逗号分隔）；cpus: "8" / "1.5" / "500m"
       （别名 cpu，映射容器 resources.limits.cpu）；memory: "64Gi" / "64g"（映射容器
       resources.limits.memory，docker 小写单位 b/k/m/g/t 按 1024 进制转换为 Ki/Mi/Gi/Ti）。
-      未列出的键会被忽略（K8s 无容器级 swap 限制，不支持 memory_swap）。留空时使用安全默认值，行为不变。
+      cpus/memory 未设置时按卡数自动计算：ZW-M890P 为 31 核和 256Gi/卡，OAM-810E
+      为 11 核和 112Gi/卡；node_selector 未指定 board-type 时按 OAM-810E 计算。
+      显式设置的值覆盖对应默认值。未列出的键会被忽略（K8s 无容器级 swap 限制，
+      不支持 memory_swap）。
     required: false
     default: ''
   artifact_paths:

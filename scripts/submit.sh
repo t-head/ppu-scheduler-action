@@ -197,6 +197,7 @@ if [[ -n "${USER_ENV_JSON:-}" && "${USER_ENV_JSON}" != "{}" && "${USER_ENV_JSON}
 fi
 
 NODE_SELECTOR_YAML=""
+BOARD_TYPE=""
 if [ -n "$NODE_SELECTOR" ]; then
   _ns_items=""
   IFS=',' read -ra _ns_pairs <<< "$NODE_SELECTOR"
@@ -231,6 +232,7 @@ if [ -n "$NODE_SELECTOR" ]; then
       fi
     fi
 
+    [ "$_key" = "board-type" ] && BOARD_TYPE="$_val"
     _ns_items+="    ${_key}: \"${_val}\""$'\n'
   done
   _ns_items="${_ns_items%$'\n'}"
@@ -249,7 +251,7 @@ fi
 #   cap_add:      "SYS_PTRACE,IPC_LOCK"  → securityContext.capabilities.add（逗号分隔）
 #   cpus:         "8" / "1.5" / "500m"   → resources.limits.cpu（别名 cpu）
 #   memory:       "64Gi" / "64g"         → resources.limits.memory（docker 小写单位按 1024 进制转换）
-# 留空时全部保持默认，行为与未引入本选项前完全一致。
+# cpus/memory 留空时按卡型和 NPROC 自动计算，其他选项保持各自默认值。
 PRIVILEGED="false"
 HOST_IPC="false"
 HOST_NETWORK="false"
@@ -336,9 +338,50 @@ if [ -n "$CONTAINER_OPTIONS" ]; then
       exit 1
     fi
   fi
-
-  log_info "container_options: privileged=${PRIVILEGED} host_ipc=${HOST_IPC} host_network=${HOST_NETWORK} dns_policy=${DNS_POLICY:-<集群默认>} shm_size=${SHM_SIZE:-64Gi(默认)} cap_add=${CAP_ADD:-<none>} cpus=${CPUS:-<不限>} memory=${MEMORY:-<不限>}"
 fi
+
+if [ -z "$CPUS" ]; then
+  case "$BOARD_TYPE" in
+    ZW-M890P)
+      CPU_PER_PPU=31
+      CPU_MAX=248
+      ;;
+    OAM-810E|"")
+      CPU_PER_PPU=11
+      CPU_MAX=176
+      ;;
+    *)
+      log_error "node_selector: 未知 board-type '${BOARD_TYPE}'，无法确定默认 CPU；请显式设置 container_options.cpus"
+      exit 1
+      ;;
+  esac
+  CPUS=$((NPROC * CPU_PER_PPU))
+  [ "$CPUS" -gt "$CPU_MAX" ] && CPUS="$CPU_MAX"
+  log_info "container_options.cpus 未设置，按 board-type=${BOARD_TYPE:-<未指定，按OAM-810E>}、${NPROC} PPU 自动设置为 ${CPUS}"
+fi
+
+if [ -z "$MEMORY" ]; then
+  case "$BOARD_TYPE" in
+    ZW-M890P)
+      MEMORY_PER_PPU_GI=256
+      MEMORY_MAX_GI=2048
+      ;;
+    OAM-810E|"")
+      MEMORY_PER_PPU_GI=112
+      MEMORY_MAX_GI=1792
+      ;;
+    *)
+      log_error "node_selector: 未知 board-type '${BOARD_TYPE}'，无法确定默认内存；请显式设置 container_options.memory"
+      exit 1
+      ;;
+  esac
+  MEMORY_GI=$((NPROC * MEMORY_PER_PPU_GI))
+  [ "$MEMORY_GI" -gt "$MEMORY_MAX_GI" ] && MEMORY_GI="$MEMORY_MAX_GI"
+  MEMORY="${MEMORY_GI}Gi"
+  log_info "container_options.memory 未设置，按 board-type=${BOARD_TYPE:-<未指定，按OAM-810E>}、${NPROC} PPU 自动设置为 ${MEMORY}"
+fi
+
+log_info "container_options: privileged=${PRIVILEGED} host_ipc=${HOST_IPC} host_network=${HOST_NETWORK} dns_policy=${DNS_POLICY:-<集群默认>} shm_size=${SHM_SIZE:-64Gi(默认)} cap_add=${CAP_ADD:-<none>} cpus=${CPUS:-<不限>} memory=${MEMORY}"
 
 # hostNetwork 与默认的 ClusterFirst 组合，会让 pod 拿到宿主 resolver，于是本 action
 # 自己注入的 MASTER_ADDR（headless Service 的 *.svc.cluster.local）无法解析，
