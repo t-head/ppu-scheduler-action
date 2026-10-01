@@ -567,6 +567,20 @@ if [ "$SINGLE_MODE" = false ]; then
 fi
 POD_LABELS="${POD_LABELS}"$'\n'"    app.kubernetes.io/managed-by: ppu-distributed-action"
 
+POD_AFFINITY_YAML=""
+if [ "$NNODES" -gt 1 ]; then
+  POD_AFFINITY_YAML=$(cat <<AFFINITY_EOF
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              ppu-job: "${JOB_NAME}"
+          topologyKey: kubernetes.io/hostname
+AFFINITY_EOF
+)
+fi
+
 # 从 DEFAULT_NAS_VOLUMES 动态生成 pod spec 中的 NAS volumeMounts 和 volumes
 DEFAULT_NAS_VOLUME_MOUNTS=""
 DEFAULT_NAS_VOLUME_DEFS=""
@@ -595,10 +609,11 @@ metadata:
 ${POD_LABELS}
     worker-index: "${i}"
 spec:
-  schedulerName: default-scheduler
+  schedulerName: ppu-scheduler
   hostname: ${JOB_NAME}-worker-${i}
   subdomain: ${JOB_NAME}
   restartPolicy: Never
+${POD_AFFINITY_YAML}
 ${NODE_SELECTOR_YAML}
 ${POD_LEVEL_OPTIONS_YAML}
   dnsConfig:
