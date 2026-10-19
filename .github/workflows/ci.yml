@@ -41,7 +41,8 @@ jobs:
 
           action = YAML.safe_load(File.read("action.yml"), aliases: true)
           abort "expected runs.using to be composite" unless action.dig("runs", "using") == "composite"
-          abort "expected at least one composite step" unless action.dig("runs", "steps").is_a?(Array)
+          composite_steps = action.dig("runs", "steps")
+          abort "expected at least one composite step" unless composite_steps.is_a?(Array) && composite_steps.any?
 
           %w[command image].each do |name|
             abort "expected #{name} to be required" unless action.dig("inputs", name, "required") == true
@@ -54,7 +55,7 @@ jobs:
           while IFS= read -r file; do
             printf 'Parsing %s\n' "$file"
             bash -n "$file"
-          done < <(git ls-files 'scripts/*.sh')
+          done < <(git ls-files '*.sh')
 
       - name: Verify generated names
         shell: bash
@@ -266,11 +267,11 @@ jobs:
       - name: Fetch this revision
         uses: actions/checkout@v4
 
-      - name: Restore marker
+      - name: Restore marker outside the checkout
         uses: actions/download-artifact@v4
         with:
           name: scheduler-action-transfer-fixture
-          path: restored-fixture/
+          path: ${{ runner.temp }}/restored-fixture
 
       - name: Inspect staged repository and marker
         uses: $/
@@ -282,7 +283,7 @@ jobs:
           node_selector: board-type=ZW-M890P
           dmesg_policy: always
           timeout_minutes: 10
-          artifact_paths: restored-fixture
+          artifact_paths: ${{ runner.temp }}/restored-fixture
           command: |
             set -euo pipefail
             test -f /workspace/source/action.yml
