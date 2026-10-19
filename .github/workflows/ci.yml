@@ -54,7 +54,7 @@ jobs:
           while IFS= read -r file; do
             printf 'Parsing %s\n' "$file"
             bash -n "$file"
-          done < <(git ls-files 'scripts/*.sh' '.github/scripts/*.sh')
+          done < <(git ls-files 'scripts/*.sh')
 
       - name: Verify generated names
         shell: bash
@@ -107,20 +107,28 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Launch ${{ matrix.label }} workload
+        id: smoke
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: ${{ matrix.nodes }}
+          nproc_per_node: ${{ matrix.devices }}
+          node_selector: board-type=${{ matrix.board_type }}
+          dmesg_policy: always
+          timeout_minutes: 10
+          command: ${{ env.SMOKE_COMMAND }}
+
+      - name: Assert reported results
         shell: bash
         env:
-          INPUT_NNODES: ${{ matrix.nodes }}
-          INPUT_NPROC_PER_NODE: ${{ matrix.devices }}
-          INPUT_NODE_SELECTOR: board-type=${{ matrix.board_type }}
-          INPUT_IMAGE: ${{ env.WORKER_IMAGE }}
-          INPUT_COMMAND: ${{ env.SMOKE_COMMAND }}
-          INPUT_NAMESPACE: ${{ env.TEST_NAMESPACE }}
-          INPUT_DMESG_POLICY: always
-          INPUT_TIMEOUT_MINUTES: '10'
-          MATRIX_JSON: ${{ toJSON(matrix) }}
-          PPU_RUNNER_NAME: ${{ runner.name }}
-          GITHUB_JOB_NAME: ${{ github.job }}
-        run: bash .github/scripts/run-ppu-test.sh
+          REPORTED_NAME: ${{ steps.smoke.outputs.job_name }}
+          REPORTED_STATUS: ${{ steps.smoke.outputs.job_status }}
+          REPORTED_PODS: ${{ steps.smoke.outputs.task_pods }}
+        run: |
+          printf 'name=%s status=%s pods=%s\n' "$REPORTED_NAME" "$REPORTED_STATUS" "$REPORTED_PODS"
+          [ -n "$REPORTED_NAME" ]
+          [ "$REPORTED_STATUS" = succeeded ]
 
   default-limit-check:
     name: Inspect ${{ matrix.board_type }} limits
@@ -145,20 +153,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Read enforced cgroup limits
-        shell: bash
-        env:
-          INPUT_NNODES: '0'
-          INPUT_NPROC_PER_NODE: '1'
-          INPUT_JOB_SUFFIX: limits-${{ matrix.board_type }}
-          INPUT_NODE_SELECTOR: board-type=${{ matrix.board_type }}
-          INPUT_IMAGE: ${{ env.WORKER_IMAGE }}
-          INPUT_NAMESPACE: ${{ env.TEST_NAMESPACE }}
-          INPUT_DMESG_POLICY: always
-          INPUT_TIMEOUT_MINUTES: '10'
-          MATRIX_JSON: ${{ toJSON(matrix) }}
-          PPU_RUNNER_NAME: ${{ runner.name }}
-          GITHUB_JOB_NAME: ${{ github.job }}
-          INPUT_COMMAND: |
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: 0
+          nproc_per_node: 1
+          job_suffix: limits-${{ matrix.board_type }}
+          node_selector: board-type=${{ matrix.board_type }}
+          dmesg_policy: always
+          timeout_minutes: 10
+          command: |
             ${{ env.SMOKE_COMMAND }}
             python3 - <<'PY'
             from pathlib import Path
@@ -181,7 +186,6 @@ jobs:
             if actual_memory == "max" or int(actual_memory) != memory_bytes:
                 raise SystemExit(f"unexpected memory limit: expected={memory_bytes}, actual={actual_memory}")
             PY
-        run: bash .github/scripts/run-ppu-test.sh
 
   capacity-block-check:
     name: Reject an unavailable 8-node 810E allocation
@@ -196,24 +200,27 @@ jobs:
 
       - name: Submit oversized 810E gang
         id: blocked_allocation
-        shell: bash
         continue-on-error: true
-        env:
-          INPUT_NNODES: '8'
-          INPUT_NPROC_PER_NODE: '16'
-          INPUT_NODE_SELECTOR: board-type=OAM-810E
-          INPUT_IMAGE: ${{ env.WORKER_IMAGE }}
-          INPUT_COMMAND: echo 'An unavailable allocation unexpectedly started' && exit 1
-          INPUT_NAMESPACE: ${{ env.TEST_NAMESPACE }}
-          INPUT_DMESG_POLICY: on_failure
-          INPUT_TIMEOUT_MINUTES: '3'
-          PPU_RUNNER_NAME: ${{ runner.name }}
-          GITHUB_JOB_NAME: ${{ github.job }}
-        run: bash .github/scripts/run-ppu-test.sh
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: 8
+          nproc_per_node: 16
+          node_selector: board-type=OAM-810E
+          dmesg_policy: on_failure
+          timeout_minutes: 3
+          command: echo 'An unavailable allocation unexpectedly started' && exit 1
 
       - name: Require the expected timeout
         shell: bash
-        run: test "${{ steps.blocked_allocation.outcome }}" = failure
+        env:
+          ALLOCATION_OUTCOME: ${{ steps.blocked_allocation.outcome }}
+          ALLOCATION_STATUS: ${{ steps.blocked_allocation.outputs.job_status }}
+        run: |
+          printf 'outcome=%s status=%s\n' "$ALLOCATION_OUTCOME" "$ALLOCATION_STATUS"
+          [ "$ALLOCATION_OUTCOME" = failure ]
+          [ "$ALLOCATION_STATUS" = timeout ]
 
   build-fixture:
     name: Create transfer fixture
@@ -266,24 +273,20 @@ jobs:
           path: restored-fixture/
 
       - name: Inspect staged repository and marker
-        shell: bash
-        env:
-          INPUT_NNODES: ${{ matrix.nodes }}
-          INPUT_NPROC_PER_NODE: ${{ matrix.devices }}
-          INPUT_NODE_SELECTOR: board-type=ZW-M890P
-          INPUT_IMAGE: ${{ env.WORKER_IMAGE }}
-          INPUT_NAMESPACE: ${{ env.TEST_NAMESPACE }}
-          INPUT_DMESG_POLICY: always
-          INPUT_TIMEOUT_MINUTES: '10'
-          ARTIFACT_PATHS: restored-fixture
-          MATRIX_JSON: ${{ toJSON(matrix) }}
-          PPU_RUNNER_NAME: ${{ runner.name }}
-          GITHUB_JOB_NAME: ${{ github.job }}
-          INPUT_COMMAND: |
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: ${{ matrix.nodes }}
+          nproc_per_node: ${{ matrix.devices }}
+          node_selector: board-type=ZW-M890P
+          dmesg_policy: always
+          timeout_minutes: 10
+          artifact_paths: restored-fixture
+          command: |
             set -euo pipefail
             test -f /workspace/source/action.yml
             test -f /workspace/source/README.md
             test -f /workspace/source/restored-fixture/marker.txt
             grep -qx scheduler-action-checks /workspace/source/restored-fixture/marker.txt
             ppu-smi
-        run: bash .github/scripts/run-ppu-test.sh
