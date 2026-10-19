@@ -1,0 +1,75 @@
+name: Composite Action Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Check action sources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch source
+        uses: actions/checkout@v4
+
+      - name: Inspect action definition
+        shell: bash
+        run: |
+          ruby <<'RUBY'
+          require "yaml"
+
+          action = YAML.safe_load(File.read("action.yml"), aliases: true)
+          abort "expected runs.using to be composite" unless action.dig("runs", "using") == "composite"
+          abort "expected at least one composite step" unless action.dig("runs", "steps").is_a?(Array)
+
+          %w[command image].each do |name|
+            abort "expected #{name} to be required" unless action.dig("inputs", name, "required") == true
+          end
+          RUBY
+
+      - name: Parse Bash scripts
+        shell: bash
+        run: |
+          while IFS= read -r file; do
+            printf 'Parsing %s\n' "$file"
+            bash -n "$file"
+          done < <(git ls-files 'scripts/*.sh')
+
+      - name: Verify generated names
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          first=$(env \
+            GITHUB_REPOSITORY_OWNER=t-head \
+            GITHUB_JOB_NAME=integration \
+            GITHUB_RUN_ID=654321 \
+            GITHUB_RUN_ATTEMPT=2 \
+            PPU_RUNNER_NAME=ppu-runner-01 \
+            MATRIX_JSON='{"suite":"distributed"}' \
+            bash scripts/job-name.sh)
+          duplicate=$(env \
+            GITHUB_REPOSITORY_OWNER=t-head \
+            GITHUB_JOB_NAME=integration \
+            GITHUB_RUN_ID=654321 \
+            GITHUB_RUN_ATTEMPT=2 \
+            PPU_RUNNER_NAME=ppu-runner-01 \
+            MATRIX_JSON='{"suite":"distributed"}' \
+            bash scripts/job-name.sh)
+          concurrent=$(env \
+            GITHUB_REPOSITORY_OWNER=t-head \
+            GITHUB_JOB_NAME=integration \
+            GITHUB_RUN_ID=654321 \
+            GITHUB_RUN_ATTEMPT=2 \
+            PPU_RUNNER_NAME=ppu-runner-02 \
+            MATRIX_JSON='{"suite":"distributed"}' \
+            bash scripts/job-name.sh)
+
+          test "$first" = "$duplicate"
+          test "$first" != "$concurrent"
+          [[ "$first" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?-[a-f0-9]{6}$ ]]
+          test "${#first}" -le 52
