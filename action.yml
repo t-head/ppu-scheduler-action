@@ -4,7 +4,7 @@ description: >-
   通过 PodGroup + default-scheduler 的 gang 调度与拓扑感知分配。
   应在 CPU-only 编排 runner 上执行（由用户 workflow 的 runs-on 指定编排 runner 标签），
   编排壳零占卡，算力仅在 worker pod 中消耗。
-author: 'flytiger-eco'
+author: 't-head'
 
 branding:
   icon: 'cpu'
