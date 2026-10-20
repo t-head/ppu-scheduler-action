@@ -10,7 +10,7 @@ if [ -z "$files" ]; then
   exit 0
 fi
 
-echo "::notice::dmesg 日志 NAS 路径: ${DMESG_DIR}"
+echo "dmesg 日志 NAS 路径: ${DMESG_DIR}"
 while IFS= read -r f; do echo "  ${DMESG_DIR}/${f}"; done <<< "$files"
 
 # 内核日志含进程名等外部内容，屏蔽其中的 workflow 命令

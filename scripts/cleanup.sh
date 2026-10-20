@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-log_info()  { echo "::notice::[cleanup] $*"; }
-log_warn()  { echo "::warning::[cleanup] $*"; }
+log_info()  { echo "[cleanup] $*"; }
+log_warn()  { echo "[cleanup] [warn] $*"; }
 log_error() { echo "::error::[cleanup] $*"; }
 
 NAMESPACE="${INPUT_NAMESPACE:-default}"
@@ -37,9 +37,9 @@ if [ -f "$TASK_FILE" ] && command -v jq >/dev/null 2>&1; then
   if [ -z "$TASK_STATUS" ]; then
     TASK_STATUS="$(jq -r '.status // empty' "$TASK_FILE")"
   fi
-  if [ -z "$TASK_STATUS" ] || [ "$TASK_STATUS" = "running" ]; then
-    TASK_STATUS="failed"
-  fi
+  case "$TASK_STATUS" in
+    ""|unknown|pending|running) TASK_STATUS="failed" ;;
+  esac
   TASK_END_TIME="$(date +%Y-%m-%dT%H:%M:%S%z)"
   jq --arg end_time "$TASK_END_TIME" --arg status "$TASK_STATUS" \
     '.end_time = $end_time | .status = $status' \

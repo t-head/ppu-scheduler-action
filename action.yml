@@ -115,6 +115,15 @@ outputs:
   duration_seconds:
     description: '作业运行时长（秒）'
     value: ${{ steps.submit.outputs.duration_seconds }}
+  queue_duration_seconds:
+    description: 'Time in seconds until all PPU pods are scheduled.'
+    value: ${{ steps.submit.outputs.queue_duration_seconds }}
+  occupied_ppu_card_hours:
+    description: 'PPU card-hours from pod scheduling until completion.'
+    value: ${{ steps.submit.outputs.occupied_ppu_card_hours }}
+  execution_ppu_card_hours:
+    description: 'PPU card-hours while worker containers are running.'
+    value: ${{ steps.submit.outputs.execution_ppu_card_hours }}
   task_pods:
     description: '所有 task pod 名称（逗号分隔）'
     value: ${{ steps.submit.outputs.task_pods }}
@@ -234,7 +243,7 @@ runs:
         echo "源码目录:         $GITHUB_WORKSPACE"
         # 确保 NAS 目标目录存在且可写
         if [ ! -d "/wl_nas/devops" ]; then
-          echo "::warning::NAS devops 目录不存在，尝试创建..."
+          echo "[warn] NAS devops 目录不存在，尝试创建..."
           mkdir -p /wl_nas/devops && chmod 777 /wl_nas/devops
         fi
         mkdir -p "$(dirname "$STAGE_TARBALL")"
@@ -251,7 +260,7 @@ runs:
               _apath="$GITHUB_WORKSPACE/$_apath"
             fi
             if [ ! -e "$_apath" ]; then
-              echo "::warning::artifact 路径不存在，已跳过: $_apath"
+              echo "[warn] artifact 路径不存在，已跳过: $_apath"
               continue
             fi
             _basename="$(basename "$_apath")"
@@ -317,6 +326,24 @@ runs:
         INPUT_JOB_STATUS: ${{ steps.submit.outputs.job_status }}
         SOURCE_STAGE_DIR: ${{ env.SOURCE_STAGE_DIR }}
       run: bash "$GITHUB_ACTION_PATH/scripts/cleanup.sh"
+
+    - name: Print PPU usage summary
+      if: always()
+      shell: bash
+      env:
+        JOB_NAME: ${{ steps.naming.outputs.job_name }}
+        JOB_STATUS: ${{ steps.submit.outputs.job_status }}
+        NNODES: ${{ inputs.nnodes }}
+        NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
+        DURATION_SECONDS: ${{ steps.submit.outputs.duration_seconds }}
+        QUEUE_DURATION_SECONDS: ${{ steps.submit.outputs.queue_duration_seconds }}
+        UNSCHEDULED_PODS: ${{ steps.submit.outputs.unscheduled_pods }}
+        POD_QUEUE: ${{ steps.submit.outputs.pod_queue }}
+        QUEUE_REASON: ${{ steps.submit.outputs.queue_reason }}
+        OCCUPIED_PPU_CARD_HOURS: ${{ steps.submit.outputs.occupied_ppu_card_hours }}
+        EXECUTION_PPU_CARD_HOURS: ${{ steps.submit.outputs.execution_ppu_card_hours }}
+        TASK_PODS: ${{ steps.submit.outputs.task_pods }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/print-summary.sh"
 
     - name: Print dmesg logs
       if: always() && inputs.dmesg_policy != 'never'

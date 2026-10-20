@@ -77,7 +77,6 @@ jobs:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - label: one 890P card
@@ -126,18 +125,24 @@ jobs:
           REPORTED_NAME: ${{ steps.smoke.outputs.job_name }}
           REPORTED_STATUS: ${{ steps.smoke.outputs.job_status }}
           REPORTED_PODS: ${{ steps.smoke.outputs.task_pods }}
+          REPORTED_QUEUE: ${{ steps.smoke.outputs.queue_duration_seconds }}
+          REPORTED_OCCUPIED: ${{ steps.smoke.outputs.occupied_ppu_card_hours }}
+          REPORTED_EXECUTION: ${{ steps.smoke.outputs.execution_ppu_card_hours }}
         run: |
           printf 'name=%s status=%s pods=%s\n' "$REPORTED_NAME" "$REPORTED_STATUS" "$REPORTED_PODS"
+          printf 'queue=%ss occupied=%s execution=%s card-hours\n' "$REPORTED_QUEUE" "$REPORTED_OCCUPIED" "$REPORTED_EXECUTION"
           [ -n "$REPORTED_NAME" ]
           [ "$REPORTED_STATUS" = succeeded ]
+          [[ "$REPORTED_QUEUE" =~ ^[0-9]+$ ]]
+          [[ "$REPORTED_OCCUPIED" =~ ^[0-9]+\.[0-9]{4}$ ]]
+          [[ "$REPORTED_EXECUTION" =~ ^[0-9]+\.[0-9]{4}$ ]]
 
   default-limit-check:
     name: Inspect ${{ matrix.board_type }} limits
-    needs: accelerator-smoke
+    needs: checks
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - board_type: ZW-M890P
@@ -190,7 +195,7 @@ jobs:
 
   capacity-block-check:
     name: Reject an unavailable 8-node 810E allocation
-    needs: default-limit-check
+    needs: checks
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: k8s-runner-group-cpu-thead
     container:
@@ -245,13 +250,10 @@ jobs:
 
   staging-check:
     name: Check staging with ${{ matrix.label }}
-    needs:
-      - capacity-block-check
-      - build-fixture
+    needs: build-fixture
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - label: a single card
