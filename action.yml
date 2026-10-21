@@ -108,25 +108,25 @@ inputs:
 outputs:
   job_name:
     description: '作业标识名'
-    value: ${{ steps.submit.outputs.job_name }}
+    value: ${{ steps.naming.outputs.job_name }}
   job_status:
     description: '最终作业状态：Completed / Failed / Timeout'
-    value: ${{ steps.submit.outputs.job_status }}
+    value: ${{ steps.monitor.outputs.job_status || (cancelled() && 'cancelled') || (steps.submit.outputs.job_status != 'scheduled' && steps.submit.outputs.job_status) || 'failed' }}
   duration_seconds:
-    description: '作业运行时长（秒）'
-    value: ${{ steps.submit.outputs.duration_seconds }}
+    description: 'Job duration in seconds, including scheduling and execution.'
+    value: ${{ steps.monitor.outputs.duration_seconds || steps.submit.outputs.duration_seconds }}
   queue_duration_seconds:
     description: 'Time in seconds until all PPU pods are scheduled.'
-    value: ${{ steps.submit.outputs.queue_duration_seconds }}
+    value: ${{ steps.monitor.outputs.queue_duration_seconds || steps.submit.outputs.queue_duration_seconds }}
   occupied_ppu_card_hours:
     description: 'PPU card-hours from pod scheduling until completion.'
-    value: ${{ steps.submit.outputs.occupied_ppu_card_hours }}
+    value: ${{ steps.monitor.outputs.occupied_ppu_card_hours || steps.submit.outputs.occupied_ppu_card_hours }}
   execution_ppu_card_hours:
     description: 'PPU card-hours while worker containers are running.'
-    value: ${{ steps.submit.outputs.execution_ppu_card_hours }}
+    value: ${{ steps.monitor.outputs.execution_ppu_card_hours || steps.submit.outputs.execution_ppu_card_hours }}
   task_pods:
-    description: '所有 task pod 名称（逗号分隔）'
-    value: ${{ steps.submit.outputs.task_pods }}
+    description: 'Comma-separated worker pod names.'
+    value: ${{ steps.monitor.outputs.task_pods || steps.submit.outputs.task_pods }}
   log_artifact_name:
     description: '上传的日志 artifact 名称'
     value: ${{ steps.submit.outputs.log_artifact_name }}
@@ -287,7 +287,7 @@ runs:
         echo "✓ 源码已打包暂存到 NAS: $STAGE_TARBALL ($(du -h "$STAGE_TARBALL" | cut -f1))"
         echo "::endgroup::"
 
-    - name: Submit pods and wait for completion
+    - name: Submit pods and wait for scheduling
       id: submit
       shell: bash
       env:
@@ -314,6 +314,19 @@ runs:
         USER_ENV_JSON: ${{ toJSON(env) }}
       run: bash "$GITHUB_ACTION_PATH/scripts/submit.sh"
 
+    - name: Stream workload logs and wait for completion
+      id: monitor
+      if: success() && steps.submit.outputs.job_status == 'scheduled'
+      shell: bash
+      env:
+        JOB_NAME: ${{ steps.naming.outputs.job_name }}
+        JOB_START_TIME: ${{ steps.submit.outputs.start_time }}
+        JOB_DEADLINE: ${{ steps.submit.outputs.deadline }}
+        INPUT_NAMESPACE: ${{ inputs.namespace }}
+        INPUT_NNODES: ${{ inputs.nnodes }}
+        INPUT_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/monitor.sh"
+
     - name: Cleanup resources
       id: cleanup
       if: always()
@@ -323,7 +336,7 @@ runs:
         INPUT_NAMESPACE: ${{ inputs.namespace }}
         INPUT_NNODES: ${{ inputs.nnodes }}
         INPUT_CLEANUP_POLICY: ${{ inputs.cleanup_policy }}
-        INPUT_JOB_STATUS: ${{ steps.submit.outputs.job_status }}
+        INPUT_JOB_STATUS: ${{ steps.monitor.outputs.job_status || (cancelled() && 'cancelled') || (steps.submit.outputs.job_status != 'scheduled' && steps.submit.outputs.job_status) || 'failed' }}
         SOURCE_STAGE_DIR: ${{ env.SOURCE_STAGE_DIR }}
       run: bash "$GITHUB_ACTION_PATH/scripts/cleanup.sh"
 
@@ -332,17 +345,17 @@ runs:
       shell: bash
       env:
         JOB_NAME: ${{ steps.naming.outputs.job_name }}
-        JOB_STATUS: ${{ steps.submit.outputs.job_status }}
+        JOB_STATUS: ${{ steps.monitor.outputs.job_status || (cancelled() && 'cancelled') || (steps.submit.outputs.job_status != 'scheduled' && steps.submit.outputs.job_status) || 'failed' }}
         NNODES: ${{ inputs.nnodes }}
         NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
-        DURATION_SECONDS: ${{ steps.submit.outputs.duration_seconds }}
-        QUEUE_DURATION_SECONDS: ${{ steps.submit.outputs.queue_duration_seconds }}
-        UNSCHEDULED_PODS: ${{ steps.submit.outputs.unscheduled_pods }}
-        POD_QUEUE: ${{ steps.submit.outputs.pod_queue }}
-        QUEUE_REASON: ${{ steps.submit.outputs.queue_reason }}
-        OCCUPIED_PPU_CARD_HOURS: ${{ steps.submit.outputs.occupied_ppu_card_hours }}
-        EXECUTION_PPU_CARD_HOURS: ${{ steps.submit.outputs.execution_ppu_card_hours }}
-        TASK_PODS: ${{ steps.submit.outputs.task_pods }}
+        DURATION_SECONDS: ${{ steps.monitor.outputs.duration_seconds || steps.submit.outputs.duration_seconds }}
+        QUEUE_DURATION_SECONDS: ${{ steps.monitor.outputs.queue_duration_seconds || steps.submit.outputs.queue_duration_seconds }}
+        UNSCHEDULED_PODS: ${{ steps.monitor.outputs.unscheduled_pods || steps.submit.outputs.unscheduled_pods }}
+        POD_QUEUE: ${{ steps.monitor.outputs.pod_queue || steps.submit.outputs.pod_queue }}
+        QUEUE_REASON: ${{ steps.monitor.outputs.queue_reason || steps.submit.outputs.queue_reason }}
+        OCCUPIED_PPU_CARD_HOURS: ${{ steps.monitor.outputs.occupied_ppu_card_hours || steps.submit.outputs.occupied_ppu_card_hours }}
+        EXECUTION_PPU_CARD_HOURS: ${{ steps.monitor.outputs.execution_ppu_card_hours || steps.submit.outputs.execution_ppu_card_hours }}
+        TASK_PODS: ${{ steps.monitor.outputs.task_pods || steps.submit.outputs.task_pods }}
       run: bash "$GITHUB_ACTION_PATH/scripts/print-summary.sh"
 
     - name: Print dmesg logs
@@ -355,6 +368,6 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/scripts/print-dmesg.sh"
 
     - name: Report job failure
-      if: always() && steps.submit.outputs.job_status != 'succeeded'
+      if: always() && steps.monitor.outputs.job_status != 'succeeded'
       shell: bash
       run: exit 1

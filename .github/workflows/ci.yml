@@ -57,6 +57,10 @@ jobs:
             bash -n "$file"
           done < <(git ls-files '*.sh')
 
+      - name: Exercise scheduling and monitoring transitions
+        shell: bash
+        run: python3 scripts/test-lifecycle.py
+
       - name: Verify generated names
         shell: bash
         run: |
@@ -136,6 +140,66 @@ jobs:
           [[ "$REPORTED_QUEUE" =~ ^[0-9]+$ ]]
           [[ "$REPORTED_OCCUPIED" =~ ^[0-9]+\.[0-9]{4}$ ]]
           [[ "$REPORTED_EXECUTION" =~ ^[0-9]+\.[0-9]{4}$ ]]
+
+  lifecycle-check:
+    name: Inspect ${{ matrix.label }} lifecycle
+    needs: checks
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: immediate completion
+            workload: "printf 'early-workload-log\\nfinal-workload-log\\n'; exit 0"
+            expected_status: succeeded
+            expected_outcome: success
+            minutes: 10
+          - label: command failure
+            workload: "printf 'early-workload-log\\nfinal-workload-log\\n'; exit 7"
+            expected_status: failed
+            expected_outcome: failure
+            minutes: 10
+          - label: runtime deadline
+            workload: "printf 'early-workload-log\\n'; sleep 300"
+            expected_status: timeout
+            expected_outcome: failure
+            minutes: 3
+    runs-on: k8s-runner-group-cpu-thead
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    steps:
+      - name: Fetch this revision
+        uses: actions/checkout@v4
+
+      - name: Run scheduling and log phases
+        id: lifecycle
+        continue-on-error: true
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: 0
+          nproc_per_node: 1
+          node_selector: board-type=ZW-M890P
+          timeout_minutes: ${{ matrix.minutes }}
+          command: ${{ matrix.workload }}
+
+      - name: Assert final state and removed pods
+        shell: bash
+        env:
+          ALLOCATION_NAME: ${{ steps.lifecycle.outputs.job_name }}
+          ALLOCATION_STATUS: ${{ steps.lifecycle.outputs.job_status }}
+          ALLOCATION_OUTCOME: ${{ steps.lifecycle.outcome }}
+          REQUIRED_STATUS: ${{ matrix.expected_status }}
+          REQUIRED_OUTCOME: ${{ matrix.expected_outcome }}
+          EXECUTION_CARD_HOURS: ${{ steps.lifecycle.outputs.execution_ppu_card_hours }}
+        run: |
+          [ "$ALLOCATION_STATUS" = "$REQUIRED_STATUS" ]
+          [ "$ALLOCATION_OUTCOME" = "$REQUIRED_OUTCOME" ]
+          [ -z "$(kubectl get pods -n "$TEST_NAMESPACE" -l "ppu-job=$ALLOCATION_NAME" -o name)" ]
+          if [ "$REQUIRED_STATUS" = timeout ]; then
+            awk -v value="$EXECUTION_CARD_HOURS" 'BEGIN { exit !(value > 0) }'
+          fi
 
   default-limit-check:
     name: Inspect ${{ matrix.board_type }} limits

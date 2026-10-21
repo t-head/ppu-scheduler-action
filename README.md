@@ -15,7 +15,7 @@ All PPU resources are requested by the worker pods it creates.
 - Automatic source staging: `$GITHUB_WORKSPACE` (plus optional artifacts) is packed and
   extracted inside the worker pod.
 - Default CPU/memory limits derived from board type and card count.
-- Live log streaming, explicit pending status, timeout handling and cancellation-safe cleanup.
+- Scheduling progress and worker output appear in distinct steps: placement must finish before the log step begins, which shows startup state and follows the full worker-0 log. One deadline covers both stages; resources are still removed after errors or cancellation.
 - One-line `PPU usage` notice on the run page plus a collapsed usage summary in the job log, covering queue time and occupied/execution PPU card-hours; the GitHub Job Summary is left untouched.
 - One `PPU queue` annotation emitted after the job ends, listing each pod's queue time (creation until scheduling). It is a warning with the latest scheduling failure reason when any pod queued for five minutes or more or never scheduled, and a notice otherwise. Apart from these two and errors, the action creates no run annotations.
 - Optional kernel log (`dmesg`) collection from worker nodes.

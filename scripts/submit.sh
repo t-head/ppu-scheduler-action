@@ -2,7 +2,6 @@
 set -euo pipefail
 
 POLL_INTERVAL=30
-PENDING_WARN_THRESHOLD=300
 MANIFEST_DIR="/tmp/training-manifests"
 
 mkdir -p "$MANIFEST_DIR"
@@ -20,7 +19,7 @@ set_output() {
 }
 
 # --- 预设默认输出（防止脚本异常退出时 cleanup 拿不到 job_status）---
-set_output "job_status" "unknown"
+set_output "job_status" "failed"
 set_output "duration_seconds" "0"
 set_output "queue_duration_seconds" "0"
 set_output "unscheduled_pods" "0"
@@ -29,12 +28,27 @@ set_output "queue_reason" ""
 set_output "occupied_ppu_card_hours" "0.0000"
 set_output "execution_ppu_card_hours" "0.0000"
 
-# --- SIGTERM/SIGINT trap（解决外部取消导致 unknown 状态）---
+FINAL_STATUS="failed"
+_on_exit() {
+  local rc=$?
+  trap - EXIT TERM INT
+  if [ -n "${WAIT_PID:-}" ]; then
+    kill "$WAIT_PID" 2>/dev/null || true
+    wait "$WAIT_PID" 2>/dev/null || true
+  fi
+  if [ "$FINAL_STATUS" != "scheduled" ] && [ -n "${START_TIME:-}" ]; then
+    JOB_STATUS="$FINAL_STATUS" JOB_START_TIME="$START_TIME" \
+      bash "$(dirname "${BASH_SOURCE[0]}")/report-job.sh" || true
+  fi
+  exit "$rc"
+}
 _on_signal() {
-  log_warn "收到终止信号，标记任务为 cancelled"
-  set_output "job_status" "cancelled"
+  log_warn "Scheduling cancelled"
+  FINAL_STATUS="cancelled"
+  set_output "job_status" "$FINAL_STATUS"
   exit 130
 }
+trap '_on_exit' EXIT
 trap '_on_signal' TERM INT
 
 # YAML 双引号字符串转义：将值中的特殊字符转义后可安全嵌入 value: "..." 中
@@ -535,6 +549,11 @@ kubectl delete svc "$JOB_NAME" -n "$NAMESPACE" --ignore-not-found=true 2>/dev/nu
 kubectl delete podgroups.scheduling.x-k8s.io "$JOB_NAME" -n "$NAMESPACE" --ignore-not-found=true 2>/dev/null || true
 sleep 3
 
+START_TIME=$(date +%s)
+DEADLINE=$(( START_TIME + TIMEOUT ))
+set_output "start_time" "$START_TIME"
+set_output "deadline" "$DEADLINE"
+
 # --- 创建 Headless Service ---
 if [ "$SINGLE_MODE" = false ]; then
   SVC_MANIFEST="$MANIFEST_DIR/service.yaml"
@@ -723,249 +742,49 @@ TASK_EOF
   log_info "任务记录已写入: ${TASK_FILE}"
 } 2>/dev/null || true
 
-# --- 打印各 Pod 调度节点 ---
-sleep 5
-for i in $(seq 0 $(( NNODES - 1 ))); do
-  _pod="${JOB_NAME}-worker-${i}"
-  _node=$(kubectl get pod "$_pod" -n "$NAMESPACE" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "pending")
-  log_info "Pod ${_pod} → Node: ${_node}"
-done
-
-# --- 实时流式日志（仅 worker-0）---
-POD_W0="${JOB_NAME}-worker-0"
-# 进程替换让 $! 指向重试子 shell 而非 sed；子进程放后台 wait，TERM 才能及时连带终止
-(
-  _log_child=""
-  trap 'kill "$_log_child" 2>/dev/null; exit 0' TERM
-  while true; do
-    kubectl logs "$POD_W0" -n "$NAMESPACE" -f 2>/dev/null &
-    _log_child=$!
-    wait "$_log_child" && break
-    sleep 3 &
-    _log_child=$!
-    wait "$_log_child" || true
-  done
-) > >(sed -u "s/^/[worker-0] /") &
-LOG_PID=$!
-START_TIME=$(date +%s)
-FINAL_STATUS="timeout"
-PENDING_NOTICE_SHOWN=false
-PENDING_WARNED=false
-
-log_info "等待所有 Pod 完成 (超时: ${TIMEOUT}s, 轮询: ${POLL_INTERVAL}s)..."
+log_info "Waiting for PPU scheduling (shared job timeout: ${TIMEOUT}s)..."
 
 while true; do
-  ELAPSED=$(( $(date +%s) - START_TIME ))
-
-  if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-    log_error "作业在 ${TIMEOUT}s 后超时"
+  NOW=$(date +%s)
+  ELAPSED=$(( NOW - START_TIME ))
+  if [ "$NOW" -ge "$DEADLINE" ]; then
+    log_error "PPU scheduling timed out after ${TIMEOUT}s"
     FINAL_STATUS="timeout"
-    break
+    exit 1
   fi
 
-  TOTAL_PODS=$NNODES
-  SUCCEEDED=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" \
-    --field-selector=status.phase=Succeeded -o name 2>/dev/null | wc -l | tr -d ' ' || echo 0)
-  FAILED=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" \
-    --field-selector=status.phase=Failed -o name 2>/dev/null | wc -l | tr -d ' ' || echo 0)
-  RUNNING=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" \
-    --field-selector=status.phase=Running -o name 2>/dev/null | wc -l | tr -d ' ' || echo 0)
-  PENDING=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" \
-    --field-selector=status.phase=Pending -o name 2>/dev/null | wc -l | tr -d ' ' || echo 0)
-
-  if [ "$PENDING" -gt 0 ] && [ "$PENDING_NOTICE_SHOWN" = false ]; then
-    log_info "${PENDING} 个 PPU Pod 处于 Pending，正在等待调度。"
-    PENDING_NOTICE_SHOWN=true
-  fi
-
-  if [ -f "${TASK_FILE:-}" ] && command -v jq >/dev/null 2>&1; then
-    TASK_RUNTIME_STATUS="pending"
-    if [ "$RUNNING" -gt 0 ] || [ "$SUCCEEDED" -gt 0 ]; then
-      TASK_RUNTIME_STATUS="running"
-    fi
-    TASK_RECORDED_STATUS=$(jq -r '.status // empty' "$TASK_FILE" 2>/dev/null || true)
-    if [ "$TASK_RECORDED_STATUS" != "$TASK_RUNTIME_STATUS" ]; then
-      jq --arg status "$TASK_RUNTIME_STATUS" '.status = $status' \
-        "$TASK_FILE" > "${TASK_FILE}.tmp" && mv "${TASK_FILE}.tmp" "$TASK_FILE"
+  POD_SNAPSHOT=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" -o json)
+  if [ -f "${TASK_FILE:-}" ] && printf '%s' "$POD_SNAPSHOT" | jq -e 'any(.items[]; .status.phase == "Running" or .status.phase == "Succeeded")' >/dev/null; then
+    TASK_RECORDED_STATUS=$(jq -r '.status // empty' "$TASK_FILE")
+    if [ "$TASK_RECORDED_STATUS" != "running" ]; then
+      jq '.status = "running"' "$TASK_FILE" > "${TASK_FILE}.tmp" && mv "${TASK_FILE}.tmp" "$TASK_FILE"
     fi
   fi
-
-  if [ "$SUCCEEDED" -eq "$TOTAL_PODS" ]; then
-    log_info "所有 Pod 执行成功 (succeeded=$SUCCEEDED)"
-    FINAL_STATUS="succeeded"
-    break
+  SCHEDULED=$(printf '%s' "$POD_SNAPSHOT" | jq '[.items[] | select(any(.status.conditions[]?; .type == "PodScheduled" and .status == "True"))] | length')
+  if [ "$SCHEDULED" -eq "$NNODES" ]; then
+    printf '%s' "$POD_SNAPSHOT" | jq -r '.items[] | "Pod \(.metadata.name) -> Node: \(.spec.nodeName)"'
+    FINAL_STATUS="scheduled"
+    set_output "job_status" "$FINAL_STATUS"
+    log_info "All ${NNODES} worker pods are scheduled"
+    exit 0
   fi
+
+  FAILED=$(printf '%s' "$POD_SNAPSHOT" | jq '[.items[] | select(.status.phase == "Failed")] | length')
   if [ "$FAILED" -gt 0 ]; then
-    log_error "有 Pod 执行失败 (failed=$FAILED)"
-    FINAL_STATUS="failed"
-    break
+    log_error "A worker pod failed before all pods were scheduled"
+    exit 1
   fi
 
-  if [ "$ELAPSED" -ge "$PENDING_WARN_THRESHOLD" ] && [ "$PENDING_WARNED" = false ] && [ "$PENDING" -gt 0 ]; then
-    # Pending 也包含已调度、正在拉镜像的 Pod，排队只看未调度的
-    UNSCHEDULED=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" -o json 2>/dev/null \
-      | jq '[.items[] | select([.status.conditions[]? | select(.type == "PodScheduled" and .status == "True")] | length == 0)] | length' 2>/dev/null || echo 0)
-    if [ "${UNSCHEDULED:-0}" -gt 0 ]; then
-      QUEUE_REASON=$(kubectl get events -n "$NAMESPACE" --field-selector "reason=FailedScheduling" -o json 2>/dev/null \
-        | jq -r --arg job "$JOB_NAME" '
-            [.items[] | select(.involvedObject.name | startswith($job))]
-            | sort_by(.lastTimestamp // .eventTime // "") | last | .message // empty' 2>/dev/null \
-        | tr '\r\n' '  ' | sed 's/ *$//' | cut -c1-300 || true)
-      log_warn "PPU queue: ${UNSCHEDULED}/${TOTAL_PODS} pod(s) still waiting for PPU scheduling after $(( ELAPSED / 60 ))m. Reason: ${QUEUE_REASON:-no FailedScheduling event yet}"
-      echo "::group::FailedScheduling events"
-      kubectl get events -n "$NAMESPACE" \
-        --field-selector "reason=FailedScheduling" \
-        --sort-by='.lastTimestamp' 2>/dev/null | tail -10 || true
-      echo "::endgroup::"
-      PENDING_WARNED=true
-    fi
-  fi
-
-  echo "  ${ELAPSED}s/${TIMEOUT}s - pending=$PENDING running=$RUNNING succeeded=$SUCCEEDED failed=$FAILED"
-  sleep "$POLL_INTERVAL"
-done
-
-# 停止日志流
-kill "$LOG_PID" 2>/dev/null || true
-wait "$LOG_PID" 2>/dev/null || true
-
-METRICS_END_EPOCH=$(date +%s)
-METRICS_END_TIME=$(date +%Y-%m-%dT%H:%M:%S%z)
-DURATION=$(( METRICS_END_EPOCH - START_TIME ))
-POD_SNAPSHOT=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" -o json 2>/dev/null || printf '{"items":[]}')
-
-QUEUE_START_EPOCH=0
-QUEUE_END_EPOCH=0
-QUEUE_DURATION_SECONDS=0
-UNSCHEDULED_PODS=0
-LONG_QUEUE_PODS=0
-POD_QUEUE=""
-OCCUPIED_PPU_CARD_SECONDS=0
-EXECUTION_PPU_CARD_SECONDS=0
-
-while IFS='|' read -r _pod_name _created_at _scheduled_at _started_at _finished_at; do
-  [ -z "$_pod_name" ] && continue
-
-  _created_epoch=$(date -d "$_created_at" +%s 2>/dev/null || echo 0)
-  if [ "$_created_epoch" -gt 0 ]; then
-    if [ "$QUEUE_START_EPOCH" -eq 0 ] || [ "$_created_epoch" -lt "$QUEUE_START_EPOCH" ]; then
-      QUEUE_START_EPOCH=$_created_epoch
-    fi
-    _pod_queue_end_epoch=$METRICS_END_EPOCH
-    if [ -n "$_scheduled_at" ]; then
-      _pod_queue_end_epoch=$(date -d "$_scheduled_at" +%s 2>/dev/null || echo "$METRICS_END_EPOCH")
-    fi
-    [ "$_pod_queue_end_epoch" -gt "$QUEUE_END_EPOCH" ] && QUEUE_END_EPOCH=$_pod_queue_end_epoch
-    _pod_queue_seconds=$(( _pod_queue_end_epoch - _created_epoch ))
-    [ "$_pod_queue_seconds" -lt 0 ] && _pod_queue_seconds=0
-    _pod_scheduled=1
-    [ -z "$_scheduled_at" ] && _pod_scheduled=0
-    [ "$_pod_queue_seconds" -ge "$PENDING_WARN_THRESHOLD" ] && LONG_QUEUE_PODS=$(( LONG_QUEUE_PODS + 1 ))
-    POD_QUEUE="${POD_QUEUE:+${POD_QUEUE},}${_pod_name#"${JOB_NAME}-"}:${_pod_queue_seconds}:${_pod_scheduled}"
-  fi
-
-  _resource_end_epoch=$METRICS_END_EPOCH
-  if [ -n "$_finished_at" ]; then
-    _resource_end_epoch=$(date -d "$_finished_at" +%s 2>/dev/null || echo "$METRICS_END_EPOCH")
-  fi
-
-  [ -z "$_scheduled_at" ] && UNSCHEDULED_PODS=$(( UNSCHEDULED_PODS + 1 ))
-
-  if [ -n "$_scheduled_at" ]; then
-    _scheduled_epoch=$(date -d "$_scheduled_at" +%s 2>/dev/null || echo 0)
-    if [ "$_scheduled_epoch" -gt 0 ]; then
-      _occupied_seconds=$(( _resource_end_epoch - _scheduled_epoch ))
-      [ "$_occupied_seconds" -lt 0 ] && _occupied_seconds=0
-      OCCUPIED_PPU_CARD_SECONDS=$(( OCCUPIED_PPU_CARD_SECONDS + _occupied_seconds * NPROC ))
-    fi
-  fi
-
-  if [ -n "$_started_at" ]; then
-    _started_epoch=$(date -d "$_started_at" +%s 2>/dev/null || echo 0)
-    if [ "$_started_epoch" -gt 0 ]; then
-      _execution_seconds=$(( _resource_end_epoch - _started_epoch ))
-      [ "$_execution_seconds" -lt 0 ] && _execution_seconds=0
-      EXECUTION_PPU_CARD_SECONDS=$(( EXECUTION_PPU_CARD_SECONDS + _execution_seconds * NPROC ))
-    fi
-  fi
-done < <(
-  printf '%s' "$POD_SNAPSHOT" | jq -r --arg prefix "${JOB_NAME}-worker-" '
-    .items | sort_by((.metadata.name | ltrimstr($prefix) | tonumber?) // 0) | .[] |
-    [
-      .metadata.name,
-      (.metadata.creationTimestamp // ""),
-      ([.status.conditions[]? | select(.type == "PodScheduled" and .status == "True") | .lastTransitionTime] | first // ""),
-      (.status.containerStatuses[0].state.running.startedAt // .status.containerStatuses[0].state.terminated.startedAt // ""),
-      (.status.containerStatuses[0].state.terminated.finishedAt // "")
-    ] | join("|")
-  '
-)
-
-if [ "$QUEUE_START_EPOCH" -gt 0 ] && [ "$QUEUE_END_EPOCH" -ge "$QUEUE_START_EPOCH" ]; then
-  QUEUE_DURATION_SECONDS=$(( QUEUE_END_EPOCH - QUEUE_START_EPOCH ))
-fi
-
-QUEUE_REASON=""
-if [ "$LONG_QUEUE_PODS" -gt 0 ] || [ "$UNSCHEDULED_PODS" -gt 0 ]; then
-  QUEUE_REASON=$(kubectl get events -n "$NAMESPACE" --field-selector "reason=FailedScheduling" -o json 2>/dev/null \
-    | jq -r --arg job "$JOB_NAME" '
-        [.items[] | select(.involvedObject.name | startswith($job))]
-        | sort_by(.lastTimestamp // .eventTime // "") | last | .message // empty' 2>/dev/null \
-    | tr '\r\n' '  ' | sed 's/ *$//' | cut -c1-300 || true)
-fi
-
-OCCUPIED_PPU_CARD_HOURS=$(awk -v seconds="$OCCUPIED_PPU_CARD_SECONDS" 'BEGIN { printf "%.4f", seconds / 3600 }')
-EXECUTION_PPU_CARD_HOURS=$(awk -v seconds="$EXECUTION_PPU_CARD_SECONDS" 'BEGIN { printf "%.4f", seconds / 3600 }')
-
-set_output "job_status" "$FINAL_STATUS"
-set_output "duration_seconds" "$DURATION"
-set_output "queue_duration_seconds" "$QUEUE_DURATION_SECONDS"
-set_output "unscheduled_pods" "$UNSCHEDULED_PODS"
-set_output "pod_queue" "$POD_QUEUE"
-set_output "queue_reason" "$QUEUE_REASON"
-set_output "occupied_ppu_card_hours" "$OCCUPIED_PPU_CARD_HOURS"
-set_output "execution_ppu_card_hours" "$EXECUTION_PPU_CARD_HOURS"
-
-PODS=$(printf '%s' "$POD_SNAPSHOT" | jq -r '.items[].metadata.name')
-TASK_PODS=""
-for pod in $PODS; do
-  if [ -n "$TASK_PODS" ]; then
-    TASK_PODS="${TASK_PODS},${pod}"
-  else
-    TASK_PODS="$pod"
+  log_info "${ELAPSED}s/${TIMEOUT}s - queued=$(( NNODES - SCHEDULED )) scheduled=${SCHEDULED}/${NNODES}"
+  printf '%s' "$POD_SNAPSHOT" | jq -r '
+    .items[] | select(any(.status.conditions[]?; .type == "PodScheduled" and .status == "True") | not) |
+    "  \(.metadata.name): \([.status.conditions[]? | select(.type == "PodScheduled") | .message] | first // "waiting for scheduling")"'
+  WAIT_SECONDS=$(( DEADLINE - $(date +%s) ))
+  [ "$WAIT_SECONDS" -gt "$POLL_INTERVAL" ] && WAIT_SECONDS=$POLL_INTERVAL
+  if [ "$WAIT_SECONDS" -gt 0 ]; then
+    sleep "$WAIT_SECONDS" &
+    WAIT_PID=$!
+    wait "$WAIT_PID"
+    WAIT_PID=""
   fi
 done
-set_output "task_pods" "$TASK_PODS"
-
-log_info "=== 作业执行汇总 ==="
-log_info "Job:      $JOB_NAME"
-log_info "Status:   $FINAL_STATUS"
-log_info "Duration: ${DURATION}s"
-log_info "Pods:     $TASK_PODS"
-
-# 直接更新任务记录终态（不依赖 cleanup.sh 的 output 传递）
-if [ -f "${TASK_FILE:-}" ] && command -v jq >/dev/null 2>&1; then
-  jq \
-    --arg end_time "$METRICS_END_TIME" \
-    --arg status "$FINAL_STATUS" \
-    --argjson queue_duration_seconds "$QUEUE_DURATION_SECONDS" \
-    --argjson occupied_ppu_card_seconds "$OCCUPIED_PPU_CARD_SECONDS" \
-    --argjson execution_ppu_card_seconds "$EXECUTION_PPU_CARD_SECONDS" \
-    --argjson occupied_ppu_card_hours "$OCCUPIED_PPU_CARD_HOURS" \
-    --argjson execution_ppu_card_hours "$EXECUTION_PPU_CARD_HOURS" \
-    --argjson unscheduled_pods "$UNSCHEDULED_PODS" \
-    --arg pod_queue "$POD_QUEUE" \
-    --arg queue_reason "$QUEUE_REASON" \
-    '.end_time = $end_time
-     | .status = $status
-     | .queue_duration_seconds = $queue_duration_seconds
-     | .unscheduled_pods = $unscheduled_pods
-     | .pod_queue = ($pod_queue | if . == "" then [] else split(",") | map(split(":") | {pod: .[0], queue_seconds: (.[1] | tonumber), scheduled: (.[2] == "1")}) end)
-     | .queue_reason = $queue_reason
-     | .occupied_ppu_card_seconds = $occupied_ppu_card_seconds
-     | .execution_ppu_card_seconds = $execution_ppu_card_seconds
-     | .occupied_ppu_card_hours = $occupied_ppu_card_hours
-     | .execution_ppu_card_hours = $execution_ppu_card_hours' \
-    "$TASK_FILE" > "${TASK_FILE}.tmp" && mv "${TASK_FILE}.tmp" "$TASK_FILE"
-  log_info "任务记录已更新终态: ${TASK_FILE}"
-fi
