@@ -287,7 +287,7 @@ runs:
         echo "✓ 源码已打包暂存到 NAS: $STAGE_TARBALL ($(du -h "$STAGE_TARBALL" | cut -f1))"
         echo "::endgroup::"
 
-    - name: Submit pods and wait for scheduling
+    - name: Wait for ${{ contains(format(',{0},', inputs.node_selector), ',board-type=OAM-810E,') && '810E' || contains(format(',{0},', inputs.node_selector), ',board-type=ZW-M890P,') && '890P' || 'PPU' }} pods to be scheduled
       id: submit
       shell: bash
       env:
