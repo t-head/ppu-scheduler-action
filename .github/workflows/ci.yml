@@ -43,6 +43,8 @@ jobs:
           abort "expected runs.using to be composite" unless action.dig("runs", "using") == "composite"
           composite_steps = action.dig("runs", "steps")
           abort "expected at least one composite step" unless composite_steps.is_a?(Array) && composite_steps.any?
+          values = action.fetch("outputs").values.map { |item| item["value"] } + composite_steps.flat_map { |item| (item["env"] || {}).values }
+          abort "keep status predicates out of output and environment expressions" if values.any? { |item| item.to_s.match?(/\b(always|cancelled|failure|success)\(/) }
 
           %w[command image].each do |name|
             abort "expected #{name} to be required" unless action.dig("inputs", name, "required") == true
@@ -56,6 +58,10 @@ jobs:
             printf 'Parsing %s\n' "$file"
             bash -n "$file"
           done < <(git ls-files '*.sh')
+
+      - name: Exercise scheduling and monitoring transitions
+        shell: bash
+        run: python3 scripts/test-lifecycle.py
 
       - name: Verify generated names
         shell: bash
@@ -77,7 +83,6 @@ jobs:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - label: one 890P card
@@ -126,18 +131,84 @@ jobs:
           REPORTED_NAME: ${{ steps.smoke.outputs.job_name }}
           REPORTED_STATUS: ${{ steps.smoke.outputs.job_status }}
           REPORTED_PODS: ${{ steps.smoke.outputs.task_pods }}
+          REPORTED_QUEUE: ${{ steps.smoke.outputs.queue_duration_seconds }}
+          REPORTED_OCCUPIED: ${{ steps.smoke.outputs.occupied_ppu_card_hours }}
+          REPORTED_EXECUTION: ${{ steps.smoke.outputs.execution_ppu_card_hours }}
         run: |
           printf 'name=%s status=%s pods=%s\n' "$REPORTED_NAME" "$REPORTED_STATUS" "$REPORTED_PODS"
+          printf 'queue=%ss occupied=%s execution=%s card-hours\n' "$REPORTED_QUEUE" "$REPORTED_OCCUPIED" "$REPORTED_EXECUTION"
           [ -n "$REPORTED_NAME" ]
           [ "$REPORTED_STATUS" = succeeded ]
+          [[ "$REPORTED_QUEUE" =~ ^[0-9]+$ ]]
+          [[ "$REPORTED_OCCUPIED" =~ ^[0-9]+\.[0-9]{4}$ ]]
+          [[ "$REPORTED_EXECUTION" =~ ^[0-9]+\.[0-9]{4}$ ]]
 
-  default-limit-check:
-    name: Inspect ${{ matrix.board_type }} limits
-    needs: accelerator-smoke
+  lifecycle-check:
+    name: Inspect ${{ matrix.label }} lifecycle
+    needs: checks
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
-      max-parallel: 1
+      matrix:
+        include:
+          - label: immediate completion
+            workload: "printf 'early-workload-log\\nfinal-workload-log\\n'; exit 0"
+            expected_status: succeeded
+            expected_outcome: success
+            minutes: 10
+          - label: command failure
+            workload: "printf 'early-workload-log\\nfinal-workload-log\\n'; exit 7"
+            expected_status: failed
+            expected_outcome: failure
+            minutes: 10
+          - label: runtime deadline
+            workload: "printf 'early-workload-log\\n'; sleep 300"
+            expected_status: timeout
+            expected_outcome: failure
+            minutes: 3
+    runs-on: k8s-runner-group-cpu-thead
+    container:
+      image: ghcr.io/actions/actions-runner:latest
+    steps:
+      - name: Fetch this revision
+        uses: actions/checkout@v4
+
+      - name: Run scheduling and log phases
+        id: lifecycle
+        continue-on-error: true
+        uses: $/
+        with:
+          image: ${{ env.WORKER_IMAGE }}
+          namespace: ${{ env.TEST_NAMESPACE }}
+          nnodes: 0
+          nproc_per_node: 1
+          node_selector: board-type=ZW-M890P
+          timeout_minutes: ${{ matrix.minutes }}
+          command: ${{ matrix.workload }}
+
+      - name: Assert final state and removed pods
+        shell: bash
+        env:
+          ALLOCATION_NAME: ${{ steps.lifecycle.outputs.job_name }}
+          ALLOCATION_STATUS: ${{ steps.lifecycle.outputs.job_status }}
+          ALLOCATION_OUTCOME: ${{ steps.lifecycle.outcome }}
+          REQUIRED_STATUS: ${{ matrix.expected_status }}
+          REQUIRED_OUTCOME: ${{ matrix.expected_outcome }}
+          EXECUTION_CARD_HOURS: ${{ steps.lifecycle.outputs.execution_ppu_card_hours }}
+        run: |
+          [ "$ALLOCATION_STATUS" = "$REQUIRED_STATUS" ]
+          [ "$ALLOCATION_OUTCOME" = "$REQUIRED_OUTCOME" ]
+          [ -z "$(kubectl get pods -n "$TEST_NAMESPACE" -l "ppu-job=$ALLOCATION_NAME" -o name)" ]
+          if [ "$REQUIRED_STATUS" = timeout ]; then
+            awk -v value="$EXECUTION_CARD_HOURS" 'BEGIN { exit !(value > 0) }'
+          fi
+
+  default-limit-check:
+    name: Inspect ${{ matrix.board_type }} limits
+    needs: checks
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
       matrix:
         include:
           - board_type: ZW-M890P
@@ -190,7 +261,7 @@ jobs:
 
   capacity-block-check:
     name: Reject an unavailable 8-node 810E allocation
-    needs: default-limit-check
+    needs: checks
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: k8s-runner-group-cpu-thead
     container:
@@ -245,13 +316,10 @@ jobs:
 
   staging-check:
     name: Check staging with ${{ matrix.label }}
-    needs:
-      - capacity-block-check
-      - build-fixture
+    needs: build-fixture
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - label: a single card

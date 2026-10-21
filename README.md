@@ -15,7 +15,9 @@ All PPU resources are requested by the worker pods it creates.
 - Automatic source staging: `$GITHUB_WORKSPACE` (plus optional artifacts) is packed and
   extracted inside the worker pod.
 - Default CPU/memory limits derived from board type and card count.
-- Live log streaming, timeout handling, cancellation-safe cleanup.
+- Scheduling progress and worker output appear in distinct steps: placement must finish before the log step begins, which shows startup state and follows the full worker-0 log. One deadline covers both stages; resources are still removed after errors or cancellation.
+- One-line `PPU usage` notice on the run page plus a collapsed usage summary in the job log, covering queue time and occupied/execution PPU card-hours; the GitHub Job Summary is left untouched.
+- One `PPU queue` annotation emitted after the job ends, listing each pod's queue time (creation until scheduling). It is a warning with the latest scheduling failure reason when any pod queued for five minutes or more or never scheduled, and a notice otherwise. Apart from these two and errors, the action creates no run annotations.
 - Optional kernel log (`dmesg`) collection from worker nodes.
 
 ## Usage
@@ -110,7 +112,14 @@ Variables declared in the workflow or job `env` context are forwarded automatica
 | `job_name` | Resource name of the job |
 | `job_status` | `succeeded`, `failed`, `timeout`, `cancelled` |
 | `duration_seconds` | Job duration |
+| `queue_duration_seconds` | Time until all PPU pods are scheduled |
+| `occupied_ppu_card_hours` | PPU card-hours from pod scheduling until completion, including image pulling and startup |
+| `execution_ppu_card_hours` | PPU card-hours while worker containers are running |
 | `task_pods` | Comma-separated worker pod names |
+
+The queue duration is measured from the first pod creation until every pod is scheduled. For a pod
+that never schedules, it is measured until the job ends. Both card-hours metrics sum each
+pod independently, so multi-node jobs are accounted for correctly.
 
 ## Repository layout
 

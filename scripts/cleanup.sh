@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-log_info()  { echo "::notice::[cleanup] $*"; }
-log_warn()  { echo "::warning::[cleanup] $*"; }
+log_info()  { echo "[cleanup] $*"; }
+log_warn()  { echo "[cleanup] [warn] $*"; }
 log_error() { echo "::error::[cleanup] $*"; }
 
 NAMESPACE="${INPUT_NAMESPACE:-default}"
@@ -32,14 +32,24 @@ log_info "执行全量清理: $JOB_NAME (namespace=$NAMESPACE)"
 # --- 更新任务记录 ---
 TASK_DIR="/wl_nas/devops/ppu-dashboard/tasks"
 TASK_FILE="${TASK_DIR}/${JOB_NAME}.json"
-if [ -f "$TASK_FILE" ] && command -v jq >/dev/null 2>&1; then
-  TASK_STATUS="${INPUT_JOB_STATUS:-}"
-  if [ -z "$TASK_STATUS" ]; then
-    TASK_STATUS="$(jq -r '.status // empty' "$TASK_FILE")"
-  fi
-  if [ -z "$TASK_STATUS" ] || [ "$TASK_STATUS" = "running" ]; then
+TASK_STATUS="${INPUT_JOB_STATUS:-}"
+case "$TASK_STATUS" in
+  ""|unknown|pending|running|scheduled)
+    if [ -f "$TASK_FILE" ]; then
+      TASK_STATUS="$(jq -r '.status // empty' "$TASK_FILE")"
+    fi
+    ;;
+esac
+case "$TASK_STATUS" in
+  ""|unknown|pending|running|scheduled)
     TASK_STATUS="failed"
-  fi
+    [ "${INPUT_WORKFLOW_STATUS:-}" = "cancelled" ] && TASK_STATUS="cancelled"
+    ;;
+esac
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "job_status=$TASK_STATUS" >> "$GITHUB_OUTPUT"
+fi
+if [ -f "$TASK_FILE" ] && command -v jq >/dev/null 2>&1; then
   TASK_END_TIME="$(date +%Y-%m-%dT%H:%M:%S%z)"
   jq --arg end_time "$TASK_END_TIME" --arg status "$TASK_STATUS" \
     '.end_time = $end_time | .status = $status' \
