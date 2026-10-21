@@ -43,6 +43,8 @@ jobs:
           abort "expected runs.using to be composite" unless action.dig("runs", "using") == "composite"
           composite_steps = action.dig("runs", "steps")
           abort "expected at least one composite step" unless composite_steps.is_a?(Array) && composite_steps.any?
+          values = action.fetch("outputs").values.map { |item| item["value"] } + composite_steps.flat_map { |item| (item["env"] || {}).values }
+          abort "keep status predicates out of output and environment expressions" if values.any? { |item| item.to_s.match?(/\b(always|cancelled|failure|success)\(/) }
 
           %w[command image].each do |name|
             abort "expected #{name} to be required" unless action.dig("inputs", name, "required") == true

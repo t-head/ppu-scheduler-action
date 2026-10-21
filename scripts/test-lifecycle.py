@@ -122,6 +122,8 @@ def fake_command(tool, args):
             print(json.dumps({"items": fixture["events"]}))
             return 0
         if args[:2] in (["get", "pods"], ["get", "pod"]):
+            if "--no-headers" in args:
+                return 0
             frames = fixture["frames"]
             items = frames[0]["pods"]
             for frame in frames:
@@ -354,6 +356,19 @@ class LifecycleTests(unittest.TestCase):
         self.assert_reported(outputs, "failed", 8)
         self.assertEqual(outputs["unscheduled_pods"], "6")
         self.assertEqual(outputs["duration_seconds"], "0")
+
+    def test_cleanup_resolves_cancelled_handoff_and_keeps_terminal_status(self):
+        self.configure([pod(0)])
+        for status, workflow, expected in (
+                ("scheduled", "cancelled", "cancelled"),
+                ("scheduled", "failure", "failed"),
+                ("succeeded", "cancelled", "succeeded"),
+                ("timeout", "failure", "timeout")):
+            with self.subTest(status=status, workflow=workflow):
+                rc, outputs, text = self.run_script(
+                    "cleanup.sh", INPUT_JOB_STATUS=status, INPUT_WORKFLOW_STATUS=workflow)
+                self.assertEqual(rc, 0, text)
+                self.assertEqual(outputs["job_status"], expected)
 
     def test_report_card_hours_use_pod_timestamps(self):
         self.configure([

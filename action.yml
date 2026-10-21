@@ -111,7 +111,7 @@ outputs:
     value: ${{ steps.naming.outputs.job_name }}
   job_status:
     description: '最终作业状态：Completed / Failed / Timeout'
-    value: ${{ steps.monitor.outputs.job_status || (cancelled() && 'cancelled') || (steps.submit.outputs.job_status != 'scheduled' && steps.submit.outputs.job_status) || 'failed' }}
+    value: ${{ steps.cleanup.outputs.job_status || steps.monitor.outputs.job_status || (steps.submit.outputs.job_status != 'scheduled' && steps.submit.outputs.job_status) || 'failed' }}
   duration_seconds:
     description: 'Job duration in seconds, including scheduling and execution.'
     value: ${{ steps.monitor.outputs.duration_seconds || steps.submit.outputs.duration_seconds }}
@@ -336,7 +336,8 @@ runs:
         INPUT_NAMESPACE: ${{ inputs.namespace }}
         INPUT_NNODES: ${{ inputs.nnodes }}
         INPUT_CLEANUP_POLICY: ${{ inputs.cleanup_policy }}
-        INPUT_JOB_STATUS: ${{ steps.monitor.outputs.job_status || (cancelled() && 'cancelled') || (steps.submit.outputs.job_status != 'scheduled' && steps.submit.outputs.job_status) || 'failed' }}
+        INPUT_JOB_STATUS: ${{ steps.monitor.outputs.job_status || steps.submit.outputs.job_status }}
+        INPUT_WORKFLOW_STATUS: ${{ job.status }}
         SOURCE_STAGE_DIR: ${{ env.SOURCE_STAGE_DIR }}
       run: bash "$GITHUB_ACTION_PATH/scripts/cleanup.sh"
 
@@ -345,7 +346,7 @@ runs:
       shell: bash
       env:
         JOB_NAME: ${{ steps.naming.outputs.job_name }}
-        JOB_STATUS: ${{ steps.monitor.outputs.job_status || (cancelled() && 'cancelled') || (steps.submit.outputs.job_status != 'scheduled' && steps.submit.outputs.job_status) || 'failed' }}
+        JOB_STATUS: ${{ steps.cleanup.outputs.job_status || steps.monitor.outputs.job_status || (steps.submit.outputs.job_status != 'scheduled' && steps.submit.outputs.job_status) || 'failed' }}
         NNODES: ${{ inputs.nnodes }}
         NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
         DURATION_SECONDS: ${{ steps.monitor.outputs.duration_seconds || steps.submit.outputs.duration_seconds }}
