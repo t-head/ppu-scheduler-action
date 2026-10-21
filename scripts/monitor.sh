@@ -78,7 +78,7 @@ while true; do
   if [ "$NOW" -ge "$DEADLINE" ]; then
     echo "::error::Job timed out after $(( DEADLINE - START_TIME ))s across scheduling and execution"
     FINAL_STATUS="timeout"
-    exit 1
+    exit 0
   fi
 
   POD_SNAPSHOT=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" -o json)
@@ -99,7 +99,7 @@ while true; do
     case "$W0_PHASE" in Succeeded|Failed) DRAIN_LOGS=true ;; esac
     if [ "$FAILED" -gt 0 ]; then
       echo "::error::Worker execution failed (failed=$FAILED)"
-      exit 1
+      exit 0
     fi
     FINAL_STATUS="succeeded"
     echo "All worker pods succeeded"

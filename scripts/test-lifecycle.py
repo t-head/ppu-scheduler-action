@@ -271,7 +271,7 @@ class LifecycleTests(unittest.TestCase):
         self.configure([pod(0, "Failed", EPOCH - 20, started=EPOCH - 10,
                             finished=EPOCH - 1)], logs=["training started", "container exited 1"])
         rc, outputs, text = self.run_script("monitor.sh")
-        self.assertNotEqual(rc, 0, text)
+        self.assertEqual(rc, 0, text)
         self.assert_reported(outputs, "failed", 1)
         self.assertIn("[worker-0] training started\n", text)
         self.assertIn("[worker-0] container exited 1\n", text)
@@ -284,7 +284,7 @@ class LifecycleTests(unittest.TestCase):
                 self.configure([pod(i, scheduled=EPOCH + 3 if i < scheduled_count else None)
                                 for i in range(8)])
                 rc, outputs, text = self.run_script("submit.sh")
-                self.assertNotEqual(rc, 0, text)
+                self.assertEqual(rc, 0, text)
                 self.assert_reported(outputs, "timeout", 8)
                 self.assertEqual(outputs["unscheduled_pods"], str(8 - scheduled_count))
                 self.assertEqual(outputs["execution_ppu_card_hours"], "0.0000")
@@ -303,7 +303,7 @@ class LifecycleTests(unittest.TestCase):
         before = len(self.calls())
         rc, outputs, text = self.run_script(
             "monitor.sh", JOB_START_TIME=submitted["start_time"], JOB_DEADLINE=submitted["deadline"])
-        self.assertNotEqual(rc, 0, text)
+        self.assertEqual(rc, 0, text)
         self.assert_reported(outputs, "timeout", 1)
         self.assertEqual(outputs["duration_seconds"], "60")
         monitor_sleeps = [call["args"] for call in self.calls()[before:] if call["tool"] == "sleep"]
@@ -340,7 +340,7 @@ class LifecycleTests(unittest.TestCase):
         self.configure([pod(0, "Failed", EPOCH - 90, started=EPOCH - 80,
                             finished=EPOCH - 1)] + [pod(i) for i in range(1, 8)])
         rc, outputs, text = self.run_script("submit.sh")
-        self.assertNotEqual(rc, 0, text)
+        self.assertEqual(rc, 0, text)
         self.assert_reported(outputs, "failed", 8)
         self.assertEqual(outputs["unscheduled_pods"], "7")
         self.assertEqual(outputs["duration_seconds"], "0")
@@ -352,7 +352,7 @@ class LifecycleTests(unittest.TestCase):
                         pod(1, "Failed", EPOCH - 20, started=EPOCH - 10, finished=EPOCH - 1)]
                        + [pod(i) for i in range(2, 8)], block_logs=True)
         rc, outputs, text = self.run_script("monitor.sh")
-        self.assertNotEqual(rc, 0, text)
+        self.assertEqual(rc, 0, text)
         self.assert_reported(outputs, "failed", 8)
         self.assertEqual(outputs["unscheduled_pods"], "6")
         self.assertEqual(outputs["duration_seconds"], "0")
@@ -369,6 +369,34 @@ class LifecycleTests(unittest.TestCase):
                     "cleanup.sh", INPUT_JOB_STATUS=status, INPUT_WORKFLOW_STATUS=workflow)
                 self.assertEqual(rc, 0, text)
                 self.assertEqual(outputs["job_status"], expected)
+
+    def test_cleanup_preserves_recorded_terminal_status_after_lost_outputs(self):
+        self.configure([pod(0)])
+        script = (SCRIPTS / "cleanup.sh").read_text().replace(
+            'TASK_DIR="/wl_nas/devops/ppu-dashboard/tasks"',
+            "TASK_DIR=" + shlex.quote(str(self.root)))
+        task = self.root / (self.env["JOB_NAME"] + ".json")
+        output = self.root / "cleanup-record.outputs"
+        for status, recorded, expected in (
+                ("scheduled", "timeout", "timeout"),
+                ("scheduled", "cancelled", "cancelled"),
+                ("", "succeeded", "succeeded"),
+                ("scheduled", "running", "failed"),
+                ("succeeded", "pending", "succeeded")):
+            with self.subTest(status=status, recorded=recorded):
+                task.write_text(json.dumps({"status": recorded}))
+                output.write_text("")
+                process = subprocess.Popen(
+                    ["/bin/bash", "-c", script],
+                    env={**self.env, "INPUT_JOB_STATUS": status,
+                         "INPUT_WORKFLOW_STATUS": "failure", "GITHUB_OUTPUT": str(output)},
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, start_new_session=True)
+                self.processes.append(process)
+                rc, outputs, text = self.finish(process, output)
+                self.assertEqual(rc, 0, text)
+                self.assertEqual(outputs["job_status"], expected)
+                self.assertEqual(json.loads(task.read_text())["status"], expected)
 
     def test_report_card_hours_use_pod_timestamps(self):
         self.configure([

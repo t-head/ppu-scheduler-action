@@ -33,9 +33,13 @@ log_info "执行全量清理: $JOB_NAME (namespace=$NAMESPACE)"
 TASK_DIR="/wl_nas/devops/ppu-dashboard/tasks"
 TASK_FILE="${TASK_DIR}/${JOB_NAME}.json"
 TASK_STATUS="${INPUT_JOB_STATUS:-}"
-if [ -z "$TASK_STATUS" ] && [ -f "$TASK_FILE" ]; then
-  TASK_STATUS="$(jq -r '.status // empty' "$TASK_FILE")"
-fi
+case "$TASK_STATUS" in
+  ""|unknown|pending|running|scheduled)
+    if [ -f "$TASK_FILE" ]; then
+      TASK_STATUS="$(jq -r '.status // empty' "$TASK_FILE")"
+    fi
+    ;;
+esac
 case "$TASK_STATUS" in
   ""|unknown|pending|running|scheduled)
     TASK_STATUS="failed"

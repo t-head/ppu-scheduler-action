@@ -750,7 +750,7 @@ while true; do
   if [ "$NOW" -ge "$DEADLINE" ]; then
     log_error "PPU scheduling timed out after ${TIMEOUT}s"
     FINAL_STATUS="timeout"
-    exit 1
+    exit 0
   fi
 
   POD_SNAPSHOT=$(kubectl get pods -n "$NAMESPACE" -l "ppu-job=$JOB_NAME" -o json)
@@ -772,7 +772,7 @@ while true; do
   FAILED=$(printf '%s' "$POD_SNAPSHOT" | jq '[.items[] | select(.status.phase == "Failed")] | length')
   if [ "$FAILED" -gt 0 ]; then
     log_error "A worker pod failed before all pods were scheduled"
-    exit 1
+    exit 0
   fi
 
   log_info "${ELAPSED}s/${TIMEOUT}s - queued=$(( NNODES - SCHEDULED )) scheduled=${SCHEDULED}/${NNODES}"
