@@ -145,6 +145,15 @@ class LifecycleTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="ppu-lifecycle-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.scripts = self.root / "scripts"
+        self.scripts.mkdir()
+        self.task_dir = self.root / "tasks"
+        self.task_dir.mkdir()
+        self.manifest_dir = self.root / "manifests"
+        for source in SCRIPTS.glob("*.sh"):
+            text = source.read_text().replace("/tmp/training-manifests", str(self.manifest_dir))
+            text = text.replace("/wl_nas/devops/ppu-dashboard/tasks", str(self.task_dir))
+            (self.scripts / source.name).write_text(text)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for tool in ("kubectl", "date", "sleep", "timeout"):
@@ -206,7 +215,7 @@ class LifecycleTests(unittest.TestCase):
     def start(self, script, **env):
         output = self.root / (script + ".outputs")
         process = subprocess.Popen(
-            ["/bin/bash", str(SCRIPTS / script)], env={**self.env, **env, "GITHUB_OUTPUT": str(output)},
+            ["/bin/bash", str(self.scripts / script)], env={**self.env, **env, "GITHUB_OUTPUT": str(output)},
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
         self.processes.append(process)
         return process, output
@@ -357,6 +366,67 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(outputs["unscheduled_pods"], "6")
         self.assertEqual(outputs["duration_seconds"], "0")
 
+    def test_cleanup_obeys_policy_for_all_job_outcomes(self):
+        self.env["INPUT_NNODES"] = "8"
+        self.configure([pod(i, "Running", EPOCH - 20, started=EPOCH - 10) for i in range(8)])
+        task = self.task_dir / (self.env["JOB_NAME"] + ".json")
+        staged = self.root / "source" / "source.tar.gz"
+        for policy in ("", "always", "on_success", "never"):
+            for status in ("succeeded", "failed", "timeout", "cancelled", "scheduled", "unknown", ""):
+                with self.subTest(policy=policy, status=status):
+                    task.write_text(json.dumps({"status": "running"}))
+                    staged.parent.mkdir(exist_ok=True)
+                    staged.write_bytes(b"staged source")
+                    self.manifest_dir.mkdir(exist_ok=True)
+                    (self.manifest_dir / "pod.yaml").write_text("fixture")
+                    before = len(self.calls("kubectl"))
+                    rc, outputs, text = self.run_script(
+                        "cleanup.sh", INPUT_CLEANUP_POLICY=policy, INPUT_JOB_STATUS=status,
+                        INPUT_WORKFLOW_STATUS="success", SOURCE_STAGE_DIR=str(staged))
+                    expected_status = status if status in ("succeeded", "failed", "timeout", "cancelled") else "failed"
+                    self.assertEqual(rc, 0, text)
+                    self.assertEqual(outputs["job_status"], expected_status)
+                    self.assertEqual(json.loads(task.read_text())["status"], expected_status)
+                    deleted = policy in ("", "always") or (policy == "on_success" and status == "succeeded")
+                    calls = self.calls("kubectl")[before:]
+                    self.assertEqual([call["args"][1] for call in calls if call["args"][0] == "delete"],
+                                     ["pods", "svc", "podgroups.scheduling.x-k8s.io"] if deleted else [])
+                    self.assertEqual(staged.exists(), not deleted)
+                    self.assertEqual(self.manifest_dir.exists(), not deleted)
+                    if not deleted:
+                        self.assertEqual(calls, [])
+                        self.assertIn("Preserving resources", text)
+
+    def test_failed_worker_does_not_delete_running_worker_zero(self):
+        self.env["INPUT_NNODES"] = "8"
+        self.configure([pod(0, "Running", EPOCH - 20, started=EPOCH - 10)]
+                       + [pod(i, "Failed", EPOCH - 20, started=EPOCH - 10, finished=EPOCH - 1)
+                          for i in range(1, 8)], block_logs=True)
+        rc, monitored, text = self.run_script("monitor.sh")
+        self.assertEqual(rc, 0, text)
+        self.assert_reported(monitored, "failed", 8)
+        before = len(self.calls("kubectl"))
+        rc, outputs, text = self.run_script(
+            "cleanup.sh", INPUT_CLEANUP_POLICY="on_success",
+            INPUT_JOB_STATUS=monitored["job_status"], INPUT_WORKFLOW_STATUS="success")
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(outputs["job_status"], "failed")
+        self.assertEqual(self.calls("kubectl")[before:], [])
+        self.assertIn("Preserving resources", text)
+
+    def test_cleanup_invalid_policy_preserves_resources_and_fails(self):
+        self.configure([pod(0)])
+        staged = self.root / "source.tar.gz"
+        staged.write_bytes(b"staged source")
+        rc, outputs, text = self.run_script(
+            "cleanup.sh", INPUT_CLEANUP_POLICY="on_sucess", INPUT_JOB_STATUS="succeeded",
+            SOURCE_STAGE_DIR=str(staged))
+        self.assertNotEqual(rc, 0, text)
+        self.assertEqual(outputs["job_status"], "succeeded")
+        self.assertEqual(self.calls("kubectl"), [])
+        self.assertTrue(staged.exists())
+        self.assertIn("Invalid cleanup_policy", text)
+
     def test_cleanup_resolves_cancelled_handoff_and_keeps_terminal_status(self):
         self.configure([pod(0)])
         for status, workflow, expected in (
@@ -365,17 +435,19 @@ class LifecycleTests(unittest.TestCase):
                 ("succeeded", "cancelled", "succeeded"),
                 ("timeout", "failure", "timeout")):
             with self.subTest(status=status, workflow=workflow):
+                before = len(self.calls("kubectl"))
                 rc, outputs, text = self.run_script(
-                    "cleanup.sh", INPUT_JOB_STATUS=status, INPUT_WORKFLOW_STATUS=workflow)
+                    "cleanup.sh", INPUT_CLEANUP_POLICY="on_success",
+                    INPUT_JOB_STATUS=status, INPUT_WORKFLOW_STATUS=workflow)
                 self.assertEqual(rc, 0, text)
                 self.assertEqual(outputs["job_status"], expected)
+                deletes = [call for call in self.calls("kubectl")[before:] if call["args"][0] == "delete"]
+                self.assertEqual(len(deletes), int(expected == "succeeded"))
 
     def test_cleanup_preserves_recorded_terminal_status_after_lost_outputs(self):
         self.configure([pod(0)])
-        script = (SCRIPTS / "cleanup.sh").read_text().replace(
-            'TASK_DIR="/wl_nas/devops/ppu-dashboard/tasks"',
-            "TASK_DIR=" + shlex.quote(str(self.root)))
-        task = self.root / (self.env["JOB_NAME"] + ".json")
+        script = (self.scripts / "cleanup.sh").read_text()
+        task = self.task_dir / (self.env["JOB_NAME"] + ".json")
         output = self.root / "cleanup-record.outputs"
         for status, recorded, expected in (
                 ("scheduled", "timeout", "timeout"),
@@ -386,9 +458,10 @@ class LifecycleTests(unittest.TestCase):
             with self.subTest(status=status, recorded=recorded):
                 task.write_text(json.dumps({"status": recorded}))
                 output.write_text("")
+                before = len(self.calls("kubectl"))
                 process = subprocess.Popen(
                     ["/bin/bash", "-c", script],
-                    env={**self.env, "INPUT_JOB_STATUS": status,
+                    env={**self.env, "INPUT_JOB_STATUS": status, "INPUT_CLEANUP_POLICY": "on_success",
                          "INPUT_WORKFLOW_STATUS": "failure", "GITHUB_OUTPUT": str(output)},
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, start_new_session=True)
@@ -397,6 +470,8 @@ class LifecycleTests(unittest.TestCase):
                 self.assertEqual(rc, 0, text)
                 self.assertEqual(outputs["job_status"], expected)
                 self.assertEqual(json.loads(task.read_text())["status"], expected)
+                deletes = [call for call in self.calls("kubectl")[before:] if call["args"][0] == "delete"]
+                self.assertEqual(len(deletes), int(expected == "succeeded"))
 
     def test_report_card_hours_use_pod_timestamps(self):
         self.configure([

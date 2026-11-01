@@ -7,7 +7,7 @@ log_error() { echo "::error::[cleanup] $*"; }
 
 NAMESPACE="${INPUT_NAMESPACE:-default}"
 JOB_NAME="${JOB_NAME:-}"
-# cleanup_policy 已移除：无条件执行全量清理
+CLEANUP_POLICY="${INPUT_CLEANUP_POLICY:-always}"
 NNODES="${INPUT_NNODES:-0}"
 SOURCE_STAGE_DIR="${SOURCE_STAGE_DIR:-}"
 
@@ -16,18 +16,6 @@ if [ -z "$JOB_NAME" ]; then
   log_warn "未获取到 job_name，跳过清理"
   exit 0
 fi
-
-# NAS 源码暂存 tarball 始终清理（无论 cleanup_policy，因为只是临时中转存储）
-if [ -n "${SOURCE_STAGE_DIR:-}" ] && [ -f "$SOURCE_STAGE_DIR" ]; then
-  log_info "清理 NAS 源码暂存 tarball: $SOURCE_STAGE_DIR"
-  rm -f "$SOURCE_STAGE_DIR"
-  _parent_dir="$(dirname "$SOURCE_STAGE_DIR")"
-  if [ -d "$_parent_dir" ] && [ -z "$(ls -A "$_parent_dir" 2>/dev/null)" ]; then
-    rmdir "$_parent_dir" 2>/dev/null || true
-  fi
-fi
-
-log_info "执行全量清理: $JOB_NAME (namespace=$NAMESPACE)"
 
 # --- 更新任务记录 ---
 TASK_DIR="/wl_nas/devops/ppu-dashboard/tasks"
@@ -55,6 +43,36 @@ if [ -f "$TASK_FILE" ] && command -v jq >/dev/null 2>&1; then
     '.end_time = $end_time | .status = $status' \
     "$TASK_FILE" > "${TASK_FILE}.tmp" && mv "${TASK_FILE}.tmp" "$TASK_FILE"
   log_info "任务记录已更新: ${TASK_FILE} (status=${TASK_STATUS})"
+fi
+
+case "$CLEANUP_POLICY" in
+  always) ;;
+  on_success)
+    if [ "$TASK_STATUS" != "succeeded" ]; then
+      log_info "Preserving resources: $JOB_NAME (policy=$CLEANUP_POLICY, status=$TASK_STATUS, namespace=$NAMESPACE)"
+      exit 0
+    fi
+    ;;
+  never)
+    log_info "Preserving resources: $JOB_NAME (policy=$CLEANUP_POLICY, status=$TASK_STATUS, namespace=$NAMESPACE)"
+    exit 0
+    ;;
+  *)
+    log_error "Invalid cleanup_policy: $CLEANUP_POLICY; preserving resources for $JOB_NAME"
+    exit 1
+    ;;
+esac
+
+log_info "执行全量清理: $JOB_NAME (namespace=$NAMESPACE)"
+
+# Retained workers may still need the staged source when they start.
+if [ -n "$SOURCE_STAGE_DIR" ] && [ -f "$SOURCE_STAGE_DIR" ]; then
+  log_info "清理 NAS 源码暂存 tarball: $SOURCE_STAGE_DIR"
+  rm -f "$SOURCE_STAGE_DIR"
+  _parent_dir="$(dirname "$SOURCE_STAGE_DIR")"
+  if [ -d "$_parent_dir" ] && [ -z "$(ls -A "$_parent_dir" 2>/dev/null)" ]; then
+    rmdir "$_parent_dir" 2>/dev/null || true
+  fi
 fi
 
 POD_SELECTOR="ppu-job=$JOB_NAME"
